@@ -1165,3 +1165,42 @@ fn prewarm_still_caches_preload_when_worktree_config_disabled() {
         "prewarm should preload normal repos (no extensions.worktreeConfig)"
     );
 }
+
+#[test]
+fn test_worktree_paths_for_branch_detects_duplicates() {
+    use super::worktrees::worktree_paths_for_branch;
+
+    // Two worktrees on `feature` — the state `git worktree add --force`
+    // produces. Porcelain retains every entry; only resolution collapses it.
+    let output = "worktree /path/to/main
+HEAD abcd1234
+branch refs/heads/main
+
+worktree /path/to/feature
+HEAD efgh5678
+branch refs/heads/feature
+
+worktree /path/to/feature-dup
+HEAD efgh5678
+branch refs/heads/feature
+
+";
+    let worktrees = WorktreeInfo::parse_porcelain_list(output).unwrap();
+
+    // The duplicated branch yields both paths, in git's listing order — the
+    // first is what resolution uses, the rest are what the warning surfaces.
+    assert_eq!(
+        worktree_paths_for_branch(&worktrees, "feature"),
+        vec![
+            PathBuf::from("/path/to/feature"),
+            PathBuf::from("/path/to/feature-dup"),
+        ]
+    );
+    // A branch with a single worktree is unambiguous (len 1, no warning).
+    assert_eq!(
+        worktree_paths_for_branch(&worktrees, "main"),
+        vec![PathBuf::from("/path/to/main")]
+    );
+    // A branch with no worktree yields nothing.
+    assert!(worktree_paths_for_branch(&worktrees, "absent").is_empty());
+}
