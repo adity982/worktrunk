@@ -320,36 +320,35 @@ pub(crate) fn worktree_paths_for_branch(worktrees: &[WorktreeInfo], branch: &str
 /// path — without changing which worktree is used. Deduplicated per branch so
 /// a command that resolves the same branch repeatedly (the picker, `wt list`)
 /// warns only once.
+///
+/// Called only from `worktree_for_branch` with `paths.len() > 1`, so `paths[1]`
+/// (the first shadowed worktree) always exists.
 fn warn_duplicate_checkout(branch: &str, paths: &[PathBuf]) {
     static WARNED: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
-    // A poisoned lock must not abort resolution; skip the warning instead.
-    let Ok(mut warned) = WARNED.lock() else {
-        return;
-    };
-    if !warned.insert(branch.to_string()) {
-        return;
-    }
-    drop(warned);
-
-    let listing = paths
-        .iter()
-        .map(|p| format_path_for_display(p))
-        .collect::<Vec<_>>()
-        .join("\n");
-    eprintln!(
-        "{}",
-        warning_message(cformat!(
-            "Branch <bold>{branch}</> is checked out in {} worktrees; wt uses the first:",
-            paths.len()
-        ))
-    );
-    eprintln!("{}", format_with_gutter(&listing, None));
-    if let Some(extra) = paths.get(1) {
+    // A poisoned set of already-warned branches never justifies aborting; recover it.
+    let is_new = WARNED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(branch.to_string());
+    if is_new {
+        let listing = paths
+            .iter()
+            .map(|p| format_path_for_display(p))
+            .collect::<Vec<_>>()
+            .join("\n");
+        eprintln!(
+            "{}",
+            warning_message(cformat!(
+                "Branch <bold>{branch}</> is checked out in {} worktrees; wt uses the first:",
+                paths.len()
+            ))
+        );
+        eprintln!("{}", format_with_gutter(&listing, None));
         eprintln!(
             "{}",
             hint_message(cformat!(
                 "To drop a duplicate, run <underline>git worktree remove {}</>",
-                format_path_for_display(extra)
+                format_path_for_display(&paths[1])
             ))
         );
     }
