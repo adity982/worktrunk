@@ -321,8 +321,8 @@ pub(crate) fn worktree_paths_for_branch(worktrees: &[WorktreeInfo], branch: &str
 /// a command that resolves the same branch repeatedly (the picker, `wt list`)
 /// warns only once.
 ///
-/// Called only from `worktree_for_branch` with `paths.len() > 1`, so `paths[1]`
-/// (the first shadowed worktree) always exists.
+/// Called only from `worktree_for_branch` with `paths.len() > 1`, so `paths[1..]`
+/// names at least one shadowed worktree.
 fn warn_duplicate_checkout(branch: &str, paths: &[PathBuf]) {
     static WARNED: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
     // A poisoned set of already-warned branches never justifies aborting; recover it.
@@ -344,12 +344,16 @@ fn warn_duplicate_checkout(branch: &str, paths: &[PathBuf]) {
             ))
         );
         eprintln!("{}", format_with_gutter(&listing, None));
-        eprintln!(
-            "{}",
-            hint_message(cformat!(
-                "To drop a duplicate, run <underline>git worktree remove {}</>",
-                format_path_for_display(&paths[1])
-            ))
-        );
+        // Name every shadowed worktree so removing them all is actionable; with a
+        // single extra (the common case) this is one hint.
+        for extra in &paths[1..] {
+            eprintln!(
+                "{}",
+                hint_message(cformat!(
+                    "To drop a duplicate, run <underline>git worktree remove {}</>",
+                    format_path_for_display(extra)
+                ))
+            );
+        }
     }
 }
