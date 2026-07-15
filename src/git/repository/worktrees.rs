@@ -70,7 +70,7 @@ impl Repository {
     /// and lets the same branch live in several at once. Worktrunk never creates
     /// that state; when it exists, this resolves to the first worktree git lists
     /// (roughly creation order) and warns once per branch so the otherwise-silent
-    /// choice is visible. See [`warn_duplicate_checkout`].
+    /// choice is visible. See `warn_duplicate_checkout`.
     pub fn worktree_for_branch(&self, branch: &str) -> anyhow::Result<Option<PathBuf>> {
         let worktrees = self.list_worktrees()?;
         let paths = worktree_paths_for_branch(worktrees, branch);
