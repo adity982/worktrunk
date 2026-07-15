@@ -1204,3 +1204,65 @@ branch refs/heads/feature
     // A branch with no worktree yields nothing.
     assert!(worktree_paths_for_branch(&worktrees, "absent").is_empty());
 }
+
+#[test]
+fn test_worktree_for_branch_dedups_duplicate_warning() {
+    // `git worktree add --force` puts one branch in two worktrees. Resolving it
+    // twice in a single process must warn only once — this drives both sides of
+    // the once-per-branch dedup guard (emit on the first, skip on the second)
+    // while confirming resolution is stable.
+    use super::Repository;
+    use super::canonicalize;
+    use crate::shell_exec::Cmd;
+    use std::path::Path;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = canonicalize(tmp.path()).unwrap().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    let gitconfig = tmp.path().join("test-gitconfig");
+    std::fs::write(
+        &gitconfig,
+        "[user]\n\tname = t\n\temail = t@example.com\n[init]\n\tdefaultBranch = main\n",
+    )
+    .unwrap();
+    let git = |args: &[&str], dir: &Path| {
+        let out = Cmd::new("git")
+            .env("GIT_CONFIG_GLOBAL", &gitconfig)
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("LC_ALL", "C")
+            .args(args.iter().copied())
+            .current_dir(dir)
+            .run()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?} failed");
+    };
+
+    git(&["init", "-b", "main", "."], &root);
+    std::fs::write(root.join("f"), "x").unwrap();
+    git(&["add", "."], &root);
+    git(&["commit", "-m", "init"], &root);
+    git(&["branch", "dup-feature"], &root);
+
+    let wt1 = tmp.path().join("wt1");
+    let wt2 = tmp.path().join("wt2");
+    git(
+        &["worktree", "add", wt1.to_str().unwrap(), "dup-feature"],
+        &root,
+    );
+    git(
+        &[
+            "worktree",
+            "add",
+            "--force",
+            wt2.to_str().unwrap(),
+            "dup-feature",
+        ],
+        &root,
+    );
+
+    let repo = Repository::at(&root).unwrap();
+    let first = repo.worktree_for_branch("dup-feature").unwrap();
+    let second = repo.worktree_for_branch("dup-feature").unwrap();
+    assert!(first.is_some(), "an ambiguous branch still resolves");
+    assert_eq!(first, second, "resolution is stable across the dedup guard");
+}
