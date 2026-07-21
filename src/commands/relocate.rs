@@ -444,7 +444,28 @@ impl<'a> RelocationExecutor<'a> {
                         made_progress = true;
                     }
                     Some(false) => {
-                        // Target occupied by another pending worktree - wait for it to move
+                        // Target occupied by another pending worktree. If that
+                        // occupant is itself blocked it will never vacate, so
+                        // this worktree can never reach its target either —
+                        // propagate the block. Leaving it for `break_cycle`
+                        // would temp-move it and then fail to finalize into the
+                        // still-occupied path, stranding it in the staging dir.
+                        if let Some(occupant_idx) = self.blocked_occupant(i) {
+                            let branch = self.pending[i].branch().to_string();
+                            let occupant = self.pending[occupant_idx].branch().to_string();
+                            let msg = cformat!(
+                                "Skipping <bold>{branch}</> (blocked by <bold>{occupant}</>, which can't be relocated)"
+                            );
+                            eprintln!("{}", warning_message(msg));
+                            self.blocked.insert(i);
+                            self.skipped_entries.push(SkippedEntry {
+                                branch,
+                                reason: "target_blocked",
+                            });
+                            made_progress = true;
+                        }
+                        // Otherwise the occupant is still pending and may yet
+                        // move (or forms a cycle `break_cycle` resolves).
                     }
                     None => {
                         // Target unexpectedly blocked (TOCTOU race or same-target conflict)
@@ -503,6 +524,27 @@ impl<'a> RelocationExecutor<'a> {
         self.current_locations
             .get(&canonical)
             .map(|occupant_idx| self.moved.contains(occupant_idx))
+    }
+
+    /// If `idx`'s target is occupied by a worktree we've already classified as
+    /// blocked (it will never vacate), return that occupant's index.
+    ///
+    /// A dependent whose occupant is blocked can never reach its target, so it
+    /// must be blocked too rather than handed to `break_cycle`. `break_cycle`
+    /// assumes "no progress ⟹ a cycle," temp-moves the dependent into the
+    /// staging dir, and `finalize_temp_relocations` then fails moving it into
+    /// the still-occupied target — erroring out and stranding the worktree in
+    /// staging.
+    fn blocked_occupant(&self, idx: usize) -> Option<usize> {
+        let expected = &self.pending[idx].expected_path;
+        if !expected.exists() {
+            return None;
+        }
+        let canonical = expected.canonicalize().unwrap_or_else(|_| expected.clone());
+        self.current_locations
+            .get(&canonical)
+            .copied()
+            .filter(|occupant_idx| self.blocked.contains(occupant_idx))
     }
 
     /// Move a single worktree to its expected path.

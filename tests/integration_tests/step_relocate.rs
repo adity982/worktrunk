@@ -632,6 +632,69 @@ fn test_relocate_swap(repo: TestRepo) {
     assert!(path_for_beta.exists(), "beta should be at repo.beta");
 }
 
+/// A worktree whose target is occupied by a *blocked* worktree must itself be
+/// skipped, not temp-moved.
+///
+/// Regression: `beta` sits at `alpha`'s target, so `alpha` depends on `beta`
+/// vacating — but `beta`'s own target is a plain non-worktree file with no
+/// `--clobber`, so `beta` is blocked and never moves. Previously the no-progress
+/// branch treated `alpha` as a cycle, temp-moved it into the staging dir, and
+/// `finalize` then failed moving it into the still-occupied target — erroring
+/// out and stranding `alpha` in `.git/wt/staging/relocate/`.
+#[rstest]
+fn test_relocate_blocked_occupant_skips_dependent(repo: TestRepo) {
+    let parent = worktree_parent(&repo);
+
+    // beta occupies alpha's expected path (repo.alpha).
+    let path_alpha = parent.join("repo.alpha");
+    repo.run_git(&[
+        "worktree",
+        "add",
+        "-b",
+        "beta",
+        path_alpha.to_str().unwrap(),
+    ]);
+
+    // alpha lives at a non-standard location and wants repo.alpha.
+    let wrong_alpha = parent.join("wrong-alpha");
+    repo.run_git(&[
+        "worktree",
+        "add",
+        "-b",
+        "alpha",
+        wrong_alpha.to_str().unwrap(),
+    ]);
+
+    // Block beta's target (repo.beta) with a plain, non-worktree directory.
+    let path_beta = parent.join("repo.beta");
+    fs::create_dir_all(&path_beta).unwrap();
+    fs::write(path_beta.join("blocker.txt"), "blocker").unwrap();
+
+    // Both are skipped; the command must succeed and strand nothing.
+    assert_cmd_snapshot!(make_snapshot_cmd(
+        &repo,
+        "step",
+        &["relocate", "alpha", "beta"],
+        None
+    ));
+
+    // alpha stays at its original location (not stranded in staging).
+    assert!(
+        wrong_alpha.exists(),
+        "alpha should remain at its original location: {}",
+        wrong_alpha.display()
+    );
+    // beta stays where it was (still occupying repo.alpha).
+    assert!(path_alpha.exists(), "beta should remain at repo.alpha");
+    // Nothing left behind in the staging dir.
+    let stranded = repo.root_path().join(".git/wt/staging/relocate/alpha");
+    assert!(
+        !stranded.exists(),
+        "alpha must not be stranded in the staging dir: {}",
+        stranded.display()
+    );
+}
+
 /// Test relocating multiple worktrees shows compact output
 #[rstest]
 fn test_relocate_multiple(repo: TestRepo) {
