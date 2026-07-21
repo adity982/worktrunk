@@ -189,6 +189,14 @@ pub enum RemoveResult {
         /// worktree-local `pre-remove` hook, so the integration decision can
         /// be made during preparation.
         integration_reason: Option<worktrunk::git::IntegrationReason>,
+        /// Path of a still-intact worktree that also has `branch_name` checked
+        /// out (via `git worktree add --force`). Only set on a pruned
+        /// branch-only removal: the target's directory was gone, but a sibling
+        /// checkout survives, so the branch is retained (`deletion_mode` is
+        /// forced to `Keep`) — deleting a ref still checked out elsewhere would
+        /// orphan that worktree at a null OID. The path is surfaced so the user
+        /// knows why the branch survived.
+        branch_checked_out_at: Option<PathBuf>,
     },
 }
 
@@ -249,12 +257,14 @@ impl RemoveResult {
                 branch_name,
                 deletion_mode,
                 pruned,
+                branch_checked_out_at,
                 ..
             } => serde_json::json!({
                 "kind": "branch_only",
                 "branch": branch_name,
                 "pruned": pruned,
                 "branch_deleted": !deletion_mode.should_keep(),
+                "branch_checked_out_at": branch_checked_out_at,
             }),
         }
     }
@@ -293,6 +303,7 @@ mod tests {
             pruned: false,
             target_branch: None,
             integration_reason: None,
+            branch_checked_out_at: None,
         };
         assert_eq!(branch_only.branch_name(), Some("solo"));
     }
@@ -382,6 +393,7 @@ mod tests {
             pruned: false,
             target_branch: None,
             integration_reason: None,
+            branch_checked_out_at: None,
         };
         match result {
             RemoveResult::BranchOnly {
@@ -390,6 +402,7 @@ mod tests {
                 pruned,
                 target_branch,
                 integration_reason,
+                branch_checked_out_at,
             } => {
                 assert_eq!(branch_name, "stale-branch");
                 assert!(deletion_mode.should_keep());
@@ -397,6 +410,7 @@ mod tests {
                 assert!(!pruned);
                 assert!(target_branch.is_none());
                 assert!(integration_reason.is_none());
+                assert!(branch_checked_out_at.is_none());
             }
             _ => panic!("Expected BranchOnly variant"),
         }
@@ -410,6 +424,7 @@ mod tests {
             pruned: true,
             target_branch: Some("main".to_string()),
             integration_reason: None,
+            branch_checked_out_at: None,
         };
         match result {
             RemoveResult::BranchOnly {
@@ -418,12 +433,14 @@ mod tests {
                 pruned,
                 target_branch,
                 integration_reason,
+                branch_checked_out_at,
             } => {
                 assert_eq!(branch_name, "pruned-branch");
                 assert!(!deletion_mode.should_keep());
                 assert!(pruned);
                 assert_eq!(target_branch.as_deref(), Some("main"));
                 assert!(integration_reason.is_none());
+                assert!(branch_checked_out_at.is_none());
             }
             _ => panic!("Expected BranchOnly variant"),
         }

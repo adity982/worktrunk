@@ -254,6 +254,31 @@ impl RepositoryCliExt for Repository {
         // so their integration decision can be computed here.
         let (worktree_path, branch_name, is_current) = match resolved {
             Resolved::BranchOnly { branch, pruned } => {
+                // A pruned branch-only removal can still orphan a survivor: when
+                // the same branch is checked out in another worktree whose
+                // directory is intact (a `git worktree add --force` duplicate),
+                // deleting the ref would leave that worktree pointing at a null
+                // OID. Detect a live sibling checkout and retain the branch —
+                // the same protection Phase 5 applies to worktree removals,
+                // extended to the missing-directory fallback (the target's own
+                // entry, whose directory is gone, is excluded by `path.exists()`).
+                let sibling = pruned
+                    .then(|| {
+                        worktrees.iter().find(|wt| {
+                            wt.branch.as_deref() == Some(branch.as_str()) && wt.path.exists()
+                        })
+                    })
+                    .flatten();
+                if let Some(sibling) = sibling {
+                    return Ok(RemoveResult::BranchOnly {
+                        branch_name: branch,
+                        deletion_mode: BranchDeletionMode::Keep,
+                        pruned,
+                        target_branch: None,
+                        integration_reason: None,
+                        branch_checked_out_at: Some(sibling.path.clone()),
+                    });
+                }
                 let default_branch = self.default_branch();
                 let target = default_branch.as_deref().or(Some("HEAD"));
                 let (integration_reason, target_branch) = compute_integration_reason(
@@ -269,6 +294,7 @@ impl RepositoryCliExt for Repository {
                     pruned,
                     target_branch,
                     integration_reason,
+                    branch_checked_out_at: None,
                 });
             }
             Resolved::Worktree {

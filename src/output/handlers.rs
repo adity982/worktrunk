@@ -1044,12 +1044,14 @@ pub fn handle_remove_output(
             pruned,
             target_branch,
             integration_reason,
+            branch_checked_out_at,
         } => handle_branch_only_output(
             branch_name,
             *deletion_mode,
             *pruned,
             *integration_reason,
             target_branch.as_deref(),
+            branch_checked_out_at.as_deref(),
             quiet,
         ),
     }
@@ -1065,6 +1067,7 @@ fn handle_branch_only_output(
     pruned: bool,
     integration_reason: Option<IntegrationReason>,
     target_branch: Option<&str>,
+    branch_checked_out_at: Option<&Path>,
     quiet: bool,
 ) -> anyhow::Result<()> {
     let branch_info = if pruned {
@@ -1076,6 +1079,11 @@ fn handle_branch_only_output(
     // If we won't delete the branch, show info and return early
     if deletion_mode.should_keep() {
         eprintln!("{}", info_message(&branch_info));
+        // A sibling `--force` checkout kept the branch alive; name it so the
+        // user knows why the pruned branch survived rather than being deleted.
+        if let Some(other) = branch_checked_out_at {
+            print_branch_checked_out_elsewhere(branch_name, other);
+        }
         stderr().flush()?;
         return Ok(());
     }

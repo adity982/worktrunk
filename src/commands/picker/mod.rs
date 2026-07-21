@@ -2745,6 +2745,7 @@ pub mod tests {
             pruned: false,
             target_branch: None,
             integration_reason: None,
+            branch_checked_out_at: None,
         };
         AltXRemover::do_removal(&repo, &result, &Approvals::default()).unwrap();
 
@@ -2771,6 +2772,7 @@ pub mod tests {
             pruned: false,
             target_branch: None,
             integration_reason: None,
+            branch_checked_out_at: None,
         };
         AltXRemover::do_removal(&repo, &result, &Approvals::default()).unwrap();
 
@@ -3624,6 +3626,7 @@ pub mod tests {
             pruned: false,
             target_branch: None,
             integration_reason: None,
+            branch_checked_out_at: None,
         };
         assert_eq!(
             super::removal_failure_subject(&branch_only),
@@ -4075,6 +4078,7 @@ pub mod tests {
             pruned: false,
             target_branch: None,
             integration_reason: None,
+            branch_checked_out_at: None,
         };
         assert!(super::removal_target_still_present(&repo, &present_branch));
 
@@ -4084,6 +4088,7 @@ pub mod tests {
             pruned: false,
             target_branch: None,
             integration_reason: None,
+            branch_checked_out_at: None,
         };
         assert!(!super::removal_target_still_present(&repo, &gone_branch));
     }
@@ -4104,6 +4109,7 @@ pub mod tests {
                 pruned: false,
                 target_branch: None,
                 integration_reason: integration,
+                branch_checked_out_at: None,
             }
         };
 
@@ -4179,6 +4185,7 @@ pub mod tests {
                 pruned: false,
                 target_branch: None,
                 integration_reason: None,
+                branch_checked_out_at: None,
             }),
             "a branch-only row has no worktree to be standing in"
         );

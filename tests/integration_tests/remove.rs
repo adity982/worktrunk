@@ -3938,3 +3938,73 @@ fn test_remove_duplicate_checkout_by_name_retains_branch(mut repo: TestRepo) {
         "the other checkout must stay on the branch, not be orphaned",
     );
 }
+
+/// A pruned branch-only removal must honor the same sibling-checkout retention.
+/// When the target worktree's directory was externally removed (`rm -rf`) but a
+/// `--force` duplicate of the same branch survives, removing the stale entry
+/// prunes the metadata and would otherwise fall through to branch deletion —
+/// which, for an integrated branch, deletes the ref via the CAS `git update-ref
+/// -d` and orphans the survivor at a null OID. The survivor must be detected
+/// before that fallback and the branch retained.
+#[rstest]
+fn test_remove_pruned_dir_with_sibling_checkout_retains_branch(mut repo: TestRepo) {
+    // `feature` has no commits beyond main, so it's integrated and would be
+    // deleted by the branch-only fallback absent the sibling guard.
+    let survivor = repo.add_worktree("feature");
+
+    // A second, `--force` checkout whose directory we then remove out-of-band.
+    let dup = repo.root_path().parent().unwrap().join("repo.feature-dup");
+    repo.run_git(&[
+        "worktree",
+        "add",
+        "--force",
+        dup.to_str().unwrap(),
+        "feature",
+    ]);
+    std::fs::remove_dir_all(&dup).unwrap();
+
+    // Remove the now-missing worktree by its explicit path.
+    let output = repo
+        .wt_command()
+        .args(["remove", dup.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr)
+        .ansi_strip()
+        .into_owned();
+    assert!(
+        output.status.success(),
+        "removing a pruned worktree by path should succeed\nstderr:\n{stderr}",
+    );
+
+    // The branch survives — the surviving `--force` checkout still holds it.
+    let branch = repo
+        .git_command()
+        .args(["show-ref", "--verify", "--quiet", "refs/heads/feature"])
+        .run()
+        .unwrap();
+    assert!(
+        branch.status.success(),
+        "branch must be retained while still checked out in the survivor\nstderr:\n{stderr}",
+    );
+
+    // The survivor is intact, not orphaned at a null OID.
+    assert!(
+        repo.git_command()
+            .args(["rev-parse", "--verify", "HEAD"])
+            .current_dir(&survivor)
+            .run()
+            .unwrap()
+            .status
+            .success(),
+        "survivor HEAD must resolve to a commit, not a deleted branch\nstderr:\n{stderr}",
+    );
+
+    // The prune is reported and the retention is explained, naming the survivor.
+    assert!(
+        stderr.contains("pruned")
+            && stderr.contains("retained")
+            && stderr.contains("still checked out"),
+        "output should report the prune and explain the branch was retained\nstderr:\n{stderr}",
+    );
+}
