@@ -536,10 +536,12 @@ impl<'a> RelocationExecutor<'a> {
     /// the still-occupied target — erroring out and stranding the worktree in
     /// staging.
     fn blocked_occupant(&self, idx: usize) -> Option<usize> {
+        // The sole caller reaches here from `is_target_empty`'s `Some(false)`
+        // arm, which already established the target exists and is a tracked
+        // worktree — so no existence guard is needed. If the path were somehow
+        // gone, `canonicalize` falls back to the raw path, which won't match a
+        // canonical key, and `get` returns `None`.
         let expected = &self.pending[idx].expected_path;
-        if !expected.exists() {
-            return None;
-        }
         let canonical = expected.canonicalize().unwrap_or_else(|_| expected.clone());
         self.current_locations
             .get(&canonical)
