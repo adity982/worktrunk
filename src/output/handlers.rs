@@ -635,6 +635,20 @@ fn print_retained_unmerged_branch(branch_name: &str) {
     eprintln!("{hint}");
 }
 
+/// Explain that the branch was kept because it's checked out in another
+/// worktree (only reachable via `git worktree add --force`). Removing this
+/// worktree can't free a ref that's still live elsewhere, so the branch is
+/// retained and the sibling path is named.
+fn print_branch_checked_out_elsewhere(branch_name: &str, other_worktree: &Path) {
+    eprintln!(
+        "{}",
+        hint_message(cformat!(
+            "Branch <underline>{branch_name}</> retained; still checked out @ <underline>{}</>",
+            format_path_for_display(other_worktree)
+        ))
+    );
+}
+
 /// The canonical "branch retained because the atomic CAS delete was refused"
 /// warning. The ref moved between the integration check and the delete (a hook
 /// commit, a concurrent push), so the integrated branch is kept fail-closed
@@ -1005,6 +1019,7 @@ pub fn handle_remove_output(
             target_branch,
             force_worktree,
             removed_commit,
+            branch_checked_out_at,
         } => handle_removed_worktree_output(
             RemovedWorktreeOutputContext {
                 main_path,
@@ -1015,6 +1030,7 @@ pub fn handle_remove_output(
                 target_branch: target_branch.as_deref(),
                 force_worktree: *force_worktree,
                 removed_commit: removed_commit.as_deref(),
+                branch_checked_out_at: branch_checked_out_at.as_deref(),
                 plan,
                 foreground,
                 silent,
@@ -1461,6 +1477,10 @@ struct RemovedWorktreeOutputContext<'a> {
     target_branch: Option<&'a str>,
     force_worktree: bool,
     removed_commit: Option<&'a str>,
+    /// Path of a sibling worktree that also has this branch checked out. When
+    /// `Some`, the branch is retained (never deleted) and the path is surfaced
+    /// so the user knows why. See the field docs on [`RemoveResult`].
+    branch_checked_out_at: Option<&'a Path>,
     /// The frozen, approved hook plan. `pre-remove` / `post-remove` /
     /// `post-switch` execute only from this — no `.config/wt.toml` re-read,
     /// no `ProjectConfig` snapshot to thread.
@@ -1720,6 +1740,9 @@ fn handle_named_removed_worktree_foreground(
 
     display_info.print_message(branch_name, true, Some(stats))?;
     display_info.print_hints(branch_name, ctx.deletion_mode, safety.integration_reason)?;
+    if let Some(other) = ctx.branch_checked_out_at {
+        print_branch_checked_out_elsewhere(branch_name, other);
+    }
     print_switch_message_if_changed(ctx.changed_directory, ctx.main_path)?;
 
     spawn_hooks_after_remove(repo, ctx, branch_name, announcer)?;
@@ -1743,6 +1766,9 @@ fn handle_named_removed_worktree_background(
 
     display_info.print_message(branch_name, false, None)?;
     display_info.print_hints(branch_name, ctx.deletion_mode, safety.integration_reason)?;
+    if let Some(other) = ctx.branch_checked_out_at {
+        print_branch_checked_out_elsewhere(branch_name, other);
+    }
     print_switch_message_if_changed(ctx.changed_directory, ctx.main_path)?;
 
     // Planner predicted retention when the user asked to keep, or when the

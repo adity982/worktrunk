@@ -3804,3 +3804,137 @@ fn test_remove_merged_locally_when_upstream_diverged(#[from(repo_with_remote)] r
         "feature branch should be deleted after detection via local main"
     );
 }
+
+/// A branch checked out in two worktrees (only reachable via `git worktree add
+/// --force`) can be removed by naming the exact worktree path. The named
+/// worktree is removed, and — crucially — the branch is retained because it's
+/// still checked out in the survivor. Deleting it would orphan the survivor at
+/// a null OID (`git update-ref -d` bypasses git's checked-out-elsewhere guard),
+/// which is the data-loss this guards against.
+#[rstest]
+fn test_remove_duplicate_checkout_by_path_retains_survivor(mut repo: TestRepo) {
+    use crate::common::wait_for_worktree_removed;
+
+    let survivor = repo.add_worktree("feature");
+
+    // Second checkout of the same branch — only `--force` allows this.
+    let dup = repo.root_path().parent().unwrap().join("repo.feature-dup");
+    repo.run_git(&[
+        "worktree",
+        "add",
+        "--force",
+        dup.to_str().unwrap(),
+        "feature",
+    ]);
+
+    // Remove the duplicate by its explicit path.
+    let output = repo
+        .wt_command()
+        .args(["remove", dup.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr)
+        .ansi_strip()
+        .into_owned();
+    assert!(
+        output.status.success(),
+        "removing a duplicate checkout by path should succeed\nstderr:\n{stderr}",
+    );
+
+    // Only the named worktree is gone.
+    wait_for_worktree_removed(&dup);
+
+    // The branch survives — it's still checked out in the survivor.
+    let branch = repo
+        .git_command()
+        .args(["show-ref", "--verify", "--quiet", "refs/heads/feature"])
+        .run()
+        .unwrap();
+    assert!(
+        branch.status.success(),
+        "branch must be retained while still checked out in another worktree\nstderr:\n{stderr}",
+    );
+
+    // The survivor is intact, not orphaned at a null OID.
+    let head = repo
+        .git_command()
+        .args(["symbolic-ref", "HEAD"])
+        .current_dir(&survivor)
+        .run()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&head.stdout).trim(),
+        "refs/heads/feature",
+        "survivor worktree must stay on the branch, not be orphaned",
+    );
+    assert!(
+        repo.git_command()
+            .args(["rev-parse", "--verify", "HEAD"])
+            .current_dir(&survivor)
+            .run()
+            .unwrap()
+            .status
+            .success(),
+        "survivor HEAD must resolve to a commit, not a deleted branch",
+    );
+
+    // The retention is explained, naming the surviving checkout.
+    assert!(
+        stderr.contains("retained") && stderr.contains("still checked out"),
+        "output should explain the branch was retained\nstderr:\n{stderr}",
+    );
+}
+
+/// Removing a duplicated branch *by name* resolves to git's first-listed
+/// worktree and removes that one, still retaining the shared branch rather than
+/// orphaning the other checkout.
+#[rstest]
+fn test_remove_duplicate_checkout_by_name_retains_branch(mut repo: TestRepo) {
+    use crate::common::wait_for_worktree_removed;
+
+    let first = repo.add_worktree("feature");
+    let dup = repo.root_path().parent().unwrap().join("repo.feature-dup");
+    repo.run_git(&[
+        "worktree",
+        "add",
+        "--force",
+        dup.to_str().unwrap(),
+        "feature",
+    ]);
+
+    let output = repo
+        .wt_command()
+        .args(["remove", "feature"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr)
+        .ansi_strip()
+        .into_owned();
+    assert!(
+        output.status.success(),
+        "removing a duplicated branch by name should succeed\nstderr:\n{stderr}",
+    );
+
+    // The first-listed worktree is removed; the branch and the other checkout survive.
+    wait_for_worktree_removed(&first);
+    let branch = repo
+        .git_command()
+        .args(["show-ref", "--verify", "--quiet", "refs/heads/feature"])
+        .run()
+        .unwrap();
+    assert!(
+        branch.status.success(),
+        "branch must be retained while still checked out in the other worktree\nstderr:\n{stderr}",
+    );
+    let head = repo
+        .git_command()
+        .args(["symbolic-ref", "HEAD"])
+        .current_dir(&dup)
+        .run()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&head.stdout).trim(),
+        "refs/heads/feature",
+        "the other checkout must stay on the branch, not be orphaned",
+    );
+}

@@ -141,6 +141,9 @@ pub fn finish_after_merge(
             target_branch: Some(target_branch.to_string()),
             force_worktree: false,
             removed_commit: feature_commit.clone(),
+            // Merge removes the just-merged worktree; its branch is checked
+            // out only here, never a `--force` duplicate.
+            branch_checked_out_at: None,
         };
         handle_remove_output(
             &remove_result,

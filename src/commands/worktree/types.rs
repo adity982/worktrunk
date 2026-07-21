@@ -165,6 +165,12 @@ pub enum RemoveResult {
         /// Used for post-remove hook template variables so they reference the
         /// removed worktree's state, not the execution context.
         removed_commit: Option<String>,
+        /// Path of another worktree that also has `branch_name` checked out
+        /// (via `git worktree add --force`). When `Some`, the branch is
+        /// retained regardless of `deletion_mode` — deleting a ref still
+        /// checked out elsewhere would orphan that worktree at a null OID — and
+        /// the path is surfaced so the user knows why the branch survived.
+        branch_checked_out_at: Option<PathBuf>,
     },
     /// Branch exists but has no worktree - attempt branch deletion only.
     ///
@@ -230,12 +236,14 @@ impl RemoveResult {
                 worktree_path,
                 branch_name,
                 deletion_mode,
+                branch_checked_out_at,
                 ..
             } => serde_json::json!({
                 "kind": "worktree",
                 "branch": branch_name,
                 "path": worktree_path,
                 "branch_deleted": !deletion_mode.should_keep(),
+                "branch_checked_out_at": branch_checked_out_at,
             }),
             RemoveResult::BranchOnly {
                 branch_name,
@@ -275,6 +283,7 @@ mod tests {
             target_branch: None,
             force_worktree: false,
             removed_commit: None,
+            branch_checked_out_at: None,
         };
         assert_eq!(removed.branch_name(), Some("feature"));
 
@@ -336,6 +345,7 @@ mod tests {
             target_branch: Some("main".to_string()),
             force_worktree: false,
             removed_commit: Some("abc1234567890".to_string()),
+            branch_checked_out_at: None,
         };
         match result {
             RemoveResult::RemovedWorktree {
@@ -347,6 +357,7 @@ mod tests {
                 target_branch,
                 force_worktree,
                 removed_commit,
+                branch_checked_out_at,
             } => {
                 assert_eq!(main_path.to_str().unwrap(), "/main");
                 assert_eq!(worktree_path.to_str().unwrap(), "/worktree");
@@ -357,6 +368,7 @@ mod tests {
                 assert_eq!(target_branch.as_deref(), Some("main"));
                 assert!(!force_worktree);
                 assert_eq!(removed_commit.as_deref(), Some("abc1234567890"));
+                assert!(branch_checked_out_at.is_none());
             }
             _ => panic!("Expected RemovedWorktree variant"),
         }
@@ -428,6 +440,7 @@ mod tests {
             target_branch: None,
             force_worktree: true,
             removed_commit: None, // Detached HEAD may not have meaningful commit
+            branch_checked_out_at: None,
         };
         match result {
             RemoveResult::RemovedWorktree {

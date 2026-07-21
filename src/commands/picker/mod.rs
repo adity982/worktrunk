@@ -2721,6 +2721,7 @@ pub mod tests {
             target_branch: Some("main".to_string()),
             force_worktree: false,
             removed_commit: None,
+            branch_checked_out_at: None,
         };
 
         AltXRemover::do_removal(&repo, &result, &Approvals::default()).unwrap();
@@ -2815,6 +2816,7 @@ pub mod tests {
             target_branch: Some("main".to_string()),
             force_worktree: false,
             removed_commit: None,
+            branch_checked_out_at: None,
         };
 
         AltXRemover::do_removal(&repo, &result, &Approvals::default()).unwrap();
@@ -2905,6 +2907,7 @@ pub mod tests {
             target_branch: Some("main".to_string()),
             force_worktree: false,
             removed_commit: None,
+            branch_checked_out_at: None,
         };
 
         // Empty approvals → `approve_readonly` drops the unapproved project
@@ -3592,6 +3595,7 @@ pub mod tests {
             target_branch: Some("main".to_string()),
             force_worktree: false,
             removed_commit: None,
+            branch_checked_out_at: None,
         };
         assert_eq!(
             super::removal_failure_subject(&branched),
@@ -3607,6 +3611,7 @@ pub mod tests {
             target_branch: Some("main".to_string()),
             force_worktree: false,
             removed_commit: None,
+            branch_checked_out_at: None,
         };
         assert_eq!(
             super::removal_failure_subject(&detached),
@@ -3954,6 +3959,7 @@ pub mod tests {
             target_branch: Some("main".to_string()),
             force_worktree: false,
             removed_commit: None,
+            branch_checked_out_at: None,
         };
 
         assert_eq!(
@@ -4051,6 +4057,7 @@ pub mod tests {
             target_branch: Some("main".to_string()),
             force_worktree: false,
             removed_commit: None,
+            branch_checked_out_at: None,
         };
         assert!(super::removal_target_still_present(
             &repo,
@@ -4109,6 +4116,7 @@ pub mod tests {
             target_branch: Some("main".to_string()),
             force_worktree: false,
             removed_commit: None,
+            branch_checked_out_at: None,
         };
         assert!(
             super::removal_will_remove_target(&worktree),
@@ -4154,6 +4162,7 @@ pub mod tests {
             target_branch: Some("main".to_string()),
             force_worktree: false,
             removed_commit: None,
+            branch_checked_out_at: None,
         };
         assert!(
             super::removal_targets_current_worktree(&worktree(true)),

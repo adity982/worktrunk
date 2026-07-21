@@ -192,27 +192,42 @@ impl RepositoryCliExt for Repository {
                 };
                 let wt = worktrees
                     .iter()
-                    .find(|wt| wt.path == lookup_path)
+                    .find(|wt| worktrunk::path::paths_match(&wt.path, lookup_path))
                     .ok_or_else(|| {
                         anyhow::anyhow!("Worktree not found at {}", lookup_path.display())
                     })?;
-                if wt.locked.is_some() {
-                    let name = wt
-                        .branch
-                        .clone()
-                        .unwrap_or_else(|| wt.dir_name().to_string());
-                    return Err(GitError::WorktreeLocked {
-                        branch: name,
-                        path: wt.path.clone(),
-                        reason: wt.locked.clone(),
+                // Directory missing (e.g. external `rm -rf`): prune the stale
+                // metadata and fall back to branch-only deletion — the same
+                // handling the branch-targeted path applies. A detached
+                // worktree has no branch to fall back to, so it proceeds and
+                // surfaces the removal error.
+                if let Some(branch) = wt.branch.as_deref()
+                    && !wt.path.exists()
+                {
+                    self.prune_worktrees()?;
+                    Resolved::BranchOnly {
+                        branch: branch.to_string(),
+                        pruned: true,
                     }
-                    .into());
-                }
-                let is_current = wt.path == current_path;
-                Resolved::Worktree {
-                    path: wt.path.clone(),
-                    branch: wt.branch.clone(),
-                    is_current,
+                } else {
+                    if wt.locked.is_some() {
+                        let name = wt
+                            .branch
+                            .clone()
+                            .unwrap_or_else(|| wt.dir_name().to_string());
+                        return Err(GitError::WorktreeLocked {
+                            branch: name,
+                            path: wt.path.clone(),
+                            reason: wt.locked.clone(),
+                        }
+                        .into());
+                    }
+                    let is_current = wt.path == current_path;
+                    Resolved::Worktree {
+                        path: wt.path.clone(),
+                        branch: wt.branch.clone(),
+                        is_current,
+                    }
                 }
             }
         };
@@ -283,11 +298,36 @@ impl RepositoryCliExt for Repository {
             primary_path
         };
 
-        // Resolve target branch for integration reason display
-        let default_branch = self.default_branch();
-        let target_branch = match (&default_branch, &branch_name) {
-            (Some(db), Some(bn)) if db == bn => None,
-            _ => default_branch,
+        // A branch checked out in more than one worktree (only possible via
+        // `git worktree add --force`, which worktrunk never does itself) must
+        // not be deleted when we remove one of its worktrees: the ref is still
+        // live in the sibling, and deleting it would orphan that worktree at a
+        // null OID (`git update-ref -d` bypasses git's checked-out-elsewhere
+        // guard). Detect a sibling checkout and retain the branch regardless of
+        // the requested deletion mode.
+        let branch_checked_out_at = branch_name.as_deref().and_then(|branch| {
+            worktrees
+                .iter()
+                .find(|wt| {
+                    wt.branch.as_deref() == Some(branch)
+                        && !worktrunk::path::paths_match(&wt.path, &worktree_path)
+                })
+                .map(|wt| wt.path.clone())
+        });
+
+        // Resolve target branch for integration reason display. When the branch
+        // is retained because it's checked out elsewhere, force `Keep` (the
+        // single chokepoint every deletion path honors) and drop the target so
+        // no integration check or misleading branch-deletion messaging runs.
+        let (deletion_mode, target_branch) = if branch_checked_out_at.is_some() {
+            (BranchDeletionMode::Keep, None)
+        } else {
+            let default_branch = self.default_branch();
+            let target_branch = match (&default_branch, &branch_name) {
+                (Some(db), Some(bn)) if db == bn => None,
+                _ => default_branch,
+            };
+            (deletion_mode, target_branch)
         };
 
         // Capture commit SHA before removal for post-remove hook template variables.
@@ -310,6 +350,7 @@ impl RepositoryCliExt for Repository {
             target_branch,
             force_worktree,
             removed_commit,
+            branch_checked_out_at,
         })
     }
 
