@@ -1838,9 +1838,28 @@ fn test_switch_picker_prs_shows_loading_marker(mut repo: TestRepo) {
         "https://github.com/owner/test-repo.git",
     ]);
     let pr_json = r#"[{"number":42,"title":"Retry the flaky network test","headRefName":"fix/flaky","author":{"login":"octocat"},"isDraft":false,"url":"https://github.com/owner/test-repo/pull/42","body":""}]"#;
-    // 3s delay >> the ~1s capture, so the marker is still on screen when the
-    // helper snapshots and aborts.
-    let env_vars = mock_forge_env(&repo, "gh", "pr list", pr_json, 3000);
+    // Hold the loading marker on screen far longer than the whole boot +
+    // stabilize sequence can take, so the transient "Loading open PRs" frame is
+    // guaranteed present when the helper captures it. A 3s hold flaked on a
+    // loaded Windows runner: `boot_picker_pty`'s skim-ready wait plus its
+    // initial `wait_for_stable`, and the async worktree-column churn, ate the
+    // whole 3s window, so by the time `send_input_awaiting_content` first polled
+    // for the marker the mocked `gh pr list` had already returned and the rows
+    // had streamed in — the marker was gone and the wait timed out at
+    // STABILIZE_TIMEOUT (30s).
+    //
+    // A large hold is free here: `exec_in_pty_capture_before_abort` snapshots
+    // and sends Escape the instant the marker settles, and abort does *not* join
+    // the background `--prs` fetch thread — the interactive teardown ends it with
+    // `drop(prs_handle)` (see `run_picker` in `src/commands/picker/mod.rs`: "don't
+    // join — the forge call may still be in flight, and process exit terminates
+    // the thread"). So the picker exits in well under a second regardless of this
+    // value. The orphaned mock finishes its now-longer sleep and exits on its own
+    // (its `gh` subprocess is read-only); the file it leaves under the test
+    // tempdir is cleaned best-effort by `TempDir::drop`, which never fails the
+    // test. Match the 30s CI ceiling the other picker timeouts use so the marker
+    // outlives even a worst-case boot.
+    let env_vars = mock_forge_env(&repo, "gh", "pr list", pr_json, 30_000);
 
     let result = exec_in_pty_capture_before_abort(
         wt_bin().to_str().unwrap(),
