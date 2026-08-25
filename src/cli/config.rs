@@ -725,6 +725,7 @@ $ wt config alias dry-run deploy -- --env=staging
 - **claude** — Claude Code plugin (activity tracking + statusline)
 - **codex** — Codex plugin (Worktrunk configuration skill)
 - **opencode** — OpenCode plugin (activity tracking)
+- **pi** — Pi / oh-my-pi plugin (activity tracking)
 
 ## Examples
 
@@ -732,6 +733,7 @@ $ wt config alias dry-run deploy -- --env=staging
 $ wt config plugins claude install
 $ wt config plugins codex install
 $ wt config plugins opencode install
+$ wt config plugins pi install
 ```"#
     )]
     Plugins {

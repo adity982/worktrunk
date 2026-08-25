@@ -26,7 +26,6 @@ fn pi_agent_dir() -> Result<PathBuf> {
     if let Some(path) = std::env::var("PI_CODING_AGENT_DIR")
         .ok()
         .filter(|value| !value.is_empty())
-        .filter(|_| active_profile().is_none())
     {
         return Ok(PathBuf::from(path));
     }

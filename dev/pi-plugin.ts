@@ -13,9 +13,13 @@ export default function worktrunkActivity(pi: HookAPI): void {
     ctx: { cwd: string },
     args: ["set", string] | ["clear"],
   ): Promise<void> => {
-    await pi.exec("wt", ["config", "state", "marker", ...args], {
-      cwd: ctx.cwd,
-    });
+    try {
+      await pi.exec("wt", ["config", "state", "marker", ...args], {
+        cwd: ctx.cwd,
+      });
+    } catch {
+      // Activity tracking must never interrupt the host Pi session.
+    }
   };
 
   pi.on("agent_start", async (_event, ctx) => {
