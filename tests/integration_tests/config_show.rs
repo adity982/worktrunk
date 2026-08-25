@@ -2707,6 +2707,22 @@ fn test_pi_install_is_idempotent(temp_home: TempDir) {
 }
 
 #[rstest]
+fn test_pi_install_prompt_declined(temp_home: TempDir) {
+    let mut cmd = wt_command();
+    set_temp_home_env(&mut cmd, temp_home.path());
+    cmd.args(["config", "plugins", "pi", "install"]);
+
+    let output = cmd.output().expect("install command should run");
+    assert!(output.status.success(), "install failed: {output:?}");
+    assert!(
+        !temp_home
+            .path()
+            .join(".omp/agent/hooks/pre/worktrunk.ts")
+            .exists()
+    );
+}
+
+#[rstest]
 fn test_pi_uninstall_removes_hook(temp_home: TempDir) {
     let agent_dir = temp_home.path().join(".omp/agent");
     let plugin_path = agent_dir.join("hooks/pre/worktrunk.ts");
@@ -2733,6 +2749,21 @@ fn test_pi_uninstall_missing_is_a_no_op(temp_home: TempDir) {
 
     let output = cmd.output().expect("uninstall command should run");
     assert!(output.status.success(), "uninstall failed: {output:?}");
+}
+
+#[rstest]
+fn test_pi_uninstall_prompt_declined(temp_home: TempDir) {
+    let plugin_path = temp_home.path().join(".omp/agent/hooks/pre/worktrunk.ts");
+    fs::create_dir_all(plugin_path.parent().unwrap()).unwrap();
+    fs::write(&plugin_path, include_str!("../../dev/pi-plugin.ts")).unwrap();
+
+    let mut cmd = wt_command();
+    set_temp_home_env(&mut cmd, temp_home.path());
+    cmd.args(["config", "plugins", "pi", "uninstall"]);
+
+    let output = cmd.output().expect("uninstall command should run");
+    assert!(output.status.success(), "uninstall failed: {output:?}");
+    assert!(plugin_path.exists());
 }
 
 /// When $SHELL is not set but PSModulePath is, config show should display
