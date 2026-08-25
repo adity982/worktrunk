@@ -59,11 +59,10 @@
 use std::path::PathBuf;
 
 use ansi_str::AnsiStr;
-use anyhow::Context;
 use color_print::cformat;
 use minijinja::{Environment, context};
 use worktrunk::config::ConfigFileKind;
-use worktrunk::git::Repository;
+use worktrunk::git::{Repository, git_version};
 use worktrunk::path::format_path_for_display;
 use worktrunk::shell_exec::Cmd;
 use worktrunk::styling::{eprintln, hint_message, info_message, warning_message};
@@ -331,6 +330,15 @@ pub(crate) fn write_if_verbose(verbose: u8, command_line: &str, error_msg: Optio
         return;
     }
 
+    // The collector runs after the command and writes to the same trace. Mark
+    // all of its subprocesses at the source so aggregate profiles can exclude
+    // them without recognizing individual commands or relying on their order.
+    worktrunk::trace::emit::with_diagnostic_context(|| {
+        write_diagnostic(command_line, error_msg);
+    });
+}
+
+fn write_diagnostic(command_line: &str, error_msg: Option<&str>) {
     // Use Repository::current() which honors the -C flag
     let Ok(repo) = Repository::current() else {
         return;
@@ -423,23 +431,6 @@ fn truncate_log(content: &str) -> String {
         .unwrap_or(start);
 
     format!("(log truncated to last ~50KB)\n{}", &content[start..])
-}
-
-/// Get git version string.
-fn git_version() -> anyhow::Result<String> {
-    let output = Cmd::new("git")
-        .arg("--version")
-        .run()
-        .context("Failed to run git --version")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let version = stdout
-        .trim()
-        .strip_prefix("git version ")
-        .unwrap_or(stdout.trim())
-        .to_string();
-
-    Ok(version)
 }
 
 /// Render the curated environment variables ([`DIAGNOSTIC_ENV_VARS`]) plus git's

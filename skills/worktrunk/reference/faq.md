@@ -10,7 +10,7 @@ Branch switching uses one directory: uncommitted changes from one agent get mixe
 
 Git's built-in worktree commands work but require manual lifecycle management:
 
-```bash
+```console
 # Plain git worktree workflow
 $ git worktree add -b feature-branch ../myapp-feature main
 $ cd ../myapp-feature
@@ -23,7 +23,7 @@ $ git branch -d feature-branch
 
 Worktrunk automates the full lifecycle:
 
-```bash
+```console
 $ wt switch --create feature-branch  # Creates worktree, runs setup hooks
 # ...work...
 $ wt merge                            # Merges into default branch, cleans up
@@ -59,7 +59,7 @@ Not natively — stacked-branch workflows are a large design space, so Worktrunk
 
 Stash the changes, create the worktree, then pop:
 
-```bash
+```console
 $ git stash push -u           # -u also stashes untracked files
 $ wt switch --create feature  # new branch off the default branch
 $ git stash pop               # changes reappear in the new worktree
@@ -130,13 +130,15 @@ Created by `wt config shell install`:
   - `Documents/PowerShell/Microsoft.PowerShell_profile.ps1` (PowerShell 7+)
   - `Documents/WindowsPowerShell/Microsoft.PowerShell_profile.ps1` (Windows PowerShell 5.1)
 
+Fish and Nushell wrappers live at a path named after the command, so install writes that file whole, replacing an existing `functions/wt.fish`, `completions/wt.fish`, or `wt.nu`. Bash, zsh, and PowerShell rc files hold the rest of a shell's setup, so install only appends a line to those.
+
 **PowerShell detection on Windows:** When running from cmd.exe or PowerShell, both PowerShell profile files are created automatically. When running from Git Bash or MSYS2, PowerShell is skipped (use `wt config shell install powershell` to create the profiles explicitly).
 
 **To remove:** `wt config shell uninstall`.
 
 ### 4. Metadata in `.git/` (automatic)
 
-Worktrunk stores small amounts of cache and log data in the repository's `.git/` directory:
+Worktrunk stores repository state, caches, and logs under `.git/`:
 
 | Location | Purpose | Created by |
 |----------|---------|------------|
@@ -153,11 +155,15 @@ Worktrunk stores small amounts of cache and log data in the repository's `.git/`
 
 None of this is tracked by git or pushed to remotes.
 
-**To remove:** `wt config state clear` removes all worktrunk data — config keys, caches, markers, hints, variables, logs, and stale trash.
+**To remove:** `wt config state clear` removes all repository data: config keys, caches, markers, hints, variables, logs, and stale trash.
+
+### 5. Temporary files (automatic)
+
+Worktrunk creates temporary Git index copies named `$TMPDIR/worktrunk-temp-index-*`. They let `wt list`, `wt statusline`, `wt step diff`, and `wt switch` include untracked files without changing the real index. The files are removed when the command exits normally.
 
 ### What Worktrunk does NOT create
 
-- No files outside `.git/`, config directories, or worktree directories
+- No files outside `.git/`, config directories, worktree directories, or the system temporary directory
 - No global git hooks
 - No modifications to `~/.gitconfig`
 - No long-running background processes or daemons
@@ -170,7 +176,9 @@ Worktrunk can delete **worktrees** and **branches**. Both have safeguards.
 
 `wt remove` mirrors `git worktree remove`: it refuses to remove worktrees with uncommitted changes (staged, modified, or untracked files). The `--force` flag removes the worktree anyway, discarding all of those changes.
 
-For worktrees containing precious ignored data (databases, caches, large assets), use `git worktree lock`:
+Removal also refuses, `--force` included, when the directory at a registered path no longer holds the worktree registered there — a clone made there after the worktree was deleted, say, or another worktree of the same repository moved onto the path. `--force` waives uncommitted changes, not the check for what the directory holds, and `git worktree remove` refuses the same cases.
+
+To protect a worktree from removal entirely (say it holds a local database), lock it:
 
 ```bash
 git worktree lock ../myproject.feature --reason "Contains local database"
@@ -186,12 +194,15 @@ For the full algorithm, see [Branch cleanup](https://worktrunk.dev/remove/#branc
 
 Use `-D` to force-delete branches with unmerged changes. Use `--no-delete-branch` to keep the branch regardless of status.
 
+A branch checked out in a second worktree is retained regardless, `-D` included. Deleting it would leave that worktree unable to resolve `HEAD`; only `git worktree add --force` produces that state.
+
 ### Other cleanup
 
+- `wt merge` / `wt step push` — the target branch's checked-out worktree is updated to the merged commits, so a file those commits delete disappears from it, and an ignored file at a path they track is overwritten — the same result a `git merge` run in that worktree would produce. Uncommitted changes at paths the merge doesn't touch stay in place, staged or not; one at a path it does touch refuses the merge upfront, naming the file
 - `wt remove` — besides the target worktree, two cleanup mechanisms run. The removed worktree's own `git fsmonitor--daemon` (git's per-worktree filesystem watcher under `core.fsmonitor=true`, which would leak once its worktree is gone) is sent `git fsmonitor--daemon stop`, then force-terminated (`SIGTERM`, then `SIGKILL`) via the PID resolved from its IPC socket if it didn't exit. A background sweep then deletes `.git/wt/trash/` entries older than 24 hours (directories orphaned when a previous background removal was interrupted) and terminates fsmonitor daemons whose worktree no longer exists (orphans from `git worktree remove`, `rm -rf`, or a crashed `wt`)
 - `wt config state clear` — removes all worktrunk data from `.git/` (config keys, caches, markers, hints, variables, logs, stale trash)
-- `wt config shell install` — when migrating an integration to a new location, removes the worktrunk-managed file left at the old one: fish `conf.d/wt.fish` (now `functions/wt.fish`) and nushell wrappers stranded under `<config-dir>/vendor/autoload` (now `<data-dir>/vendor/autoload`). Recognition is the same as for uninstall below, so a file of the user's own sitting at that path is left in place
-- `wt config shell uninstall` — removes integration lines from bash/zsh/PowerShell rc files, and deletes worktrunk's wrapper and completion files (fish `functions/`, `conf.d/`, and `completions/`; nushell `vendor/autoload`). Files are recognized by worktrunk's own content markers, whatever binary name they were installed under; files without the markers are left alone. An rc file belongs to the user, so a line qualifies only where it runs the init command: one that merely mentions it, inside a comment, an `echo`, or an alias body, stays. Every line uninstall does take is printed, before removal and again after
+- `wt config shell install` — when migrating an integration to a new location, removes the file left at the old one: fish `conf.d/wt.fish` (now `functions/wt.fish`) and nushell wrappers stranded under `<config-dir>/vendor/autoload` (now `<data-dir>/vendor/autoload`). The old path is where worktrunk's own wrapper lived and is named after the command being installed, so it's taken back whole without reading it — a `conf.d/wt.fish` left in place would be sourced at startup and shadow the new wrapper anyway. Only that exact filename is touched, and each removal is printed
+- `wt config shell uninstall` — removes integration lines from bash/zsh/PowerShell rc files, and deletes worktrunk's wrapper and completion files (fish `functions/`, `conf.d/`, and `completions/`; nushell `vendor/autoload`). Uninstall takes no command name, so it lists those directories and recognizes files by worktrunk's own content markers, whatever binary name they were installed under; files without the markers are left alone. An rc file belongs to the user, so a line qualifies only where it runs the init command: one that merely mentions it, inside a comment, an `echo`, or an alias body, stays. Every line uninstall does take is printed, before removal and again after
 
 See [What files does Worktrunk create?](#what-files-does-worktrunk-create) for details.
 
@@ -208,6 +219,7 @@ User hooks and user aliases don't require approval (you defined them). Commands 
 
 ### Example approval prompt
 
+```console
 ▲ repo needs approval to execute 3 commands:
 
 ○ pre-start install:
@@ -218,6 +230,7 @@ User hooks and user aliases don't require approval (you defined them). Commands 
   echo 'PORT={{ branch | hash_port }}' > .env.local
 
 ❯ Allow and remember? [y/N]
+```
 
 Use `--yes` to bypass prompts (useful for CI/automation).
 
@@ -227,7 +240,7 @@ All hook executions and LLM commands are recorded in `.git/wt/logs/commands.json
 
 View the log with `wt config state logs get`, or query directly:
 
-```bash
+```console
 # Recent commands
 $ tail -5 .git/wt/logs/commands.jsonl | jq .
 
@@ -261,9 +274,11 @@ Confirm it with `wt config alias dry-run <name>`: if the value is already substi
 
 To defer a variable to the nested command, wrap it as `{% raw %}{{ branch }}{% endraw %}`; for `wt step for-each`, also keep it inside a quoted `sh -c '…'` so the alias's shell doesn't word-split it. See [deferring expansion in an alias](https://worktrunk.dev/extending/#deferring-expansion-to-a-nested-wt-command). A repo-level variable like `{{ default_branch }}` is unaffected — it is identical in every worktree.
 
-## Installation fails with C compilation errors
+## What system dependencies are required?
 
-Errors related to tree-sitter or C compilation (C99 mode, `le16toh` undefined) can be avoided by installing without syntax highlighting:
+Worktrunk requires Git 2.43 or newer.
+
+Installing with Cargo and the default features also requires a C99 compiler for bash syntax highlighting. If tree-sitter or C compilation fails (C99 mode, `le16toh` undefined), install without syntax highlighting:
 
 ```bash
 cargo install worktrunk --no-default-features --features cli
@@ -281,7 +296,7 @@ cargo test
 
 ### Full integration tests
 
-Shell integration tests require bash, zsh, fish, and nushell:
+Shell integration tests require bash, zsh, fish, nushell, and pwsh, plus `jq`:
 
 ```bash
 cargo test --test integration --features shell-integration-tests

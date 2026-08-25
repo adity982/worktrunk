@@ -5,13 +5,23 @@ use crate::common::{
 use insta_cmd::assert_cmd_snapshot;
 use rstest::rstest;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::{PermissionsExt, symlink};
 use tempfile::TempDir;
 
 #[rstest]
 fn test_configure_shell_with_yes(repo: TestRepo, temp_home: TempDir) {
     // Create a fake .zshrc file
     let zshrc_path = temp_home.path().join(".zshrc");
-    fs::write(&zshrc_path, "# Existing config\n").unwrap();
+    fs::write(&zshrc_path, "# Existing config").unwrap();
+
+    #[cfg(unix)]
+    {
+        let target_path = temp_home.path().join("zshrc");
+        fs::rename(&zshrc_path, &target_path).unwrap();
+        fs::set_permissions(&target_path, fs::Permissions::from_mode(0o640)).unwrap();
+        symlink(&target_path, &zshrc_path).unwrap();
+    }
 
     let settings = setup_home_snapshot_settings(&temp_home);
     settings.bind(|| {
@@ -44,14 +54,30 @@ fn test_configure_shell_with_yes(repo: TestRepo, temp_home: TempDir) {
 
     // Verify the file was modified
     let content = fs::read_to_string(&zshrc_path).unwrap();
-    assert!(content.contains("eval \"$(command wt config shell init zsh)\""));
+    assert_eq!(
+        content,
+        "# Existing config\nif command -v wt >/dev/null 2>&1; then eval \"$(command wt config shell init zsh)\"; fi\n"
+    );
+
+    #[cfg(unix)]
+    assert!(
+        fs::symlink_metadata(&zshrc_path)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    #[cfg(unix)]
+    assert_eq!(
+        fs::metadata(&zshrc_path).unwrap().permissions().mode() & 0o777,
+        0o640
+    );
 }
 
 #[rstest]
 fn test_configure_shell_specific_shell(repo: TestRepo, temp_home: TempDir) {
     // Create a fake .zshrc file
     let zshrc_path = temp_home.path().join(".zshrc");
-    fs::write(&zshrc_path, "# Existing config\n").unwrap();
+    fs::write(&zshrc_path, "").unwrap();
 
     let settings = setup_home_snapshot_settings(&temp_home);
     settings.bind(|| {
@@ -85,7 +111,10 @@ fn test_configure_shell_specific_shell(repo: TestRepo, temp_home: TempDir) {
 
     // Verify the file was modified
     let content = fs::read_to_string(&zshrc_path).unwrap();
-    assert!(content.contains("eval \"$(command wt config shell init zsh)\""));
+    assert_eq!(
+        content,
+        "\nif command -v wt >/dev/null 2>&1; then eval \"$(command wt config shell init zsh)\"; fi\n"
+    );
 }
 
 #[rstest]
@@ -237,6 +266,31 @@ fn test_configure_shell_fish(repo: TestRepo, temp_home: TempDir) {
         "Should contain function definition: {}",
         content
     );
+}
+
+#[rstest]
+#[cfg(unix)]
+fn test_configure_shell_rejects_completion_directory(repo: TestRepo, temp_home: TempDir) {
+    let completion = temp_home.path().join(".config/fish/completions/wt.fish");
+    fs::create_dir_all(&completion).unwrap();
+
+    let settings = setup_home_snapshot_settings(&temp_home);
+    settings.bind(|| {
+        let mut cmd = wt_command();
+        repo.configure_wt_cmd(&mut cmd);
+        set_temp_home_env(&mut cmd, temp_home.path());
+        cmd.args(["config", "shell", "install", "fish", "--yes"])
+            .current_dir(repo.root_path());
+
+        assert_cmd_snapshot!(cmd, @"
+        success: false
+        exit_code: 1
+        ----- stdout -----
+
+        ----- stderr -----
+        [31m✗[39m [31mFailed to read ~/.config/fish/completions/wt.fish: Is a directory (os error 21)[39m
+        ");
+    });
 }
 
 /// Test install dry-run shows preview with gutter-formatted config content
@@ -408,20 +462,23 @@ fn test_configure_shell_fish_legacy_conf_d_cleanup(repo: TestRepo, temp_home: Te
     );
 }
 
-/// Installing fish integration leaves a user's own `conf.d/wt.fish` alone.
+/// Installing fish integration reclaims `conf.d/{cmd}.fish` whatever it holds.
 ///
-/// The legacy cleanup deletes a whole file the user never asked it to touch, so
-/// it has to recognize worktrunk's own wrapper rather than any file that
-/// mentions the init command. This one names it in a comment and pipes
-/// something unrelated to `source` — both substrings a whole-file test would
-/// take as proof the file was worktrunk's.
+/// The path names the command being installed, so it's worktrunk's; the file's
+/// contents don't enter into it. Leaving this one would break the install
+/// besides — `conf.d` is sourced at startup, so a `function wt` defined there
+/// is already loaded when fish would otherwise autoload `functions/wt.fish`.
 #[rstest]
-fn test_configure_shell_fish_preserves_user_conf_d_file(repo: TestRepo, temp_home: TempDir) {
+fn test_configure_shell_fish_reclaims_conf_d_path(repo: TestRepo, temp_home: TempDir) {
     let conf_d = temp_home.path().join(".config/fish/conf.d");
     fs::create_dir_all(&conf_d).unwrap();
-    let user_file = conf_d.join("wt.fish");
-    let user_content = "# reminder: set up with wt config shell init fish\nfunction wt_helpers\n    cat ~/.aliases | source\nend\n";
-    fs::write(&user_file, user_content).unwrap();
+    let stale = conf_d.join("wt.fish");
+    // No worktrunk header, and nothing a content test would recognize.
+    fs::write(&stale, "function wt\n    command wt-old $argv\nend\n").unwrap();
+    // A neighbour under another name is untouched: only `{cmd}.fish` is ours.
+    let neighbour = conf_d.join("aliases.fish");
+    let neighbour_content = "# reminder: wt config shell init fish\nalias ll 'ls -l'\n";
+    fs::write(&neighbour, neighbour_content).unwrap();
 
     let mut cmd = wt_command();
     repo.configure_wt_cmd(&mut cmd);
@@ -437,16 +494,22 @@ fn test_configure_shell_fish_preserves_user_conf_d_file(repo: TestRepo, temp_hom
             .path()
             .join(".config/fish/functions/wt.fish")
             .exists(),
-        "install should still write functions/wt.fish"
+        "install should write functions/wt.fish"
     );
     assert!(
-        user_file.exists(),
-        "install deleted the user's own conf.d/wt.fish"
+        !stale.exists(),
+        "install should reclaim conf.d/wt.fish: {stale:?}"
     );
     assert_eq!(
-        fs::read_to_string(&user_file).unwrap(),
-        user_content,
-        "user's own conf.d/wt.fish must survive install untouched"
+        fs::read_to_string(&neighbour).unwrap(),
+        neighbour_content,
+        "a conf.d file under another name is not worktrunk's"
+    );
+    // The removal is reported, not silent.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("deprecated"),
+        "install should report the conf.d cleanup:\n{stderr}"
     );
 }
 
@@ -699,6 +762,158 @@ fn test_configure_shell_fish_dry_run_does_not_delete_legacy(repo: TestRepo, temp
         new_file.exists(),
         "functions/wt.fish should be preserved: {:?}",
         new_file
+    );
+}
+
+/// `--dry-run` must *preview* the legacy files it would remove (issue #3644).
+///
+/// The cleanup takes back the legacy fish `conf.d/{cmd}.fish`; a preview run has
+/// to name that removal, not just the files it would add. Regression guard for
+/// the gap where `--dry-run` returned an empty `legacy_cleanups`, so the deletion
+/// never appeared before it happened.
+#[rstest]
+fn test_configure_shell_fish_dry_run_previews_legacy_removal(repo: TestRepo, temp_home: TempDir) {
+    // Bootstrap the canonical location with an actual install so functions/ and
+    // completions/ hold the exact content install writes (i.e. "already
+    // configured"), leaving only the legacy file as a pending change.
+    let mut bootstrap = wt_command();
+    repo.configure_wt_cmd(&mut bootstrap);
+    set_temp_home_env(&mut bootstrap, temp_home.path());
+    bootstrap.env("SHELL", "/bin/fish");
+    bootstrap
+        .args(["config", "shell", "install", "fish", "--yes"])
+        .current_dir(repo.root_path());
+    assert!(bootstrap.output().unwrap().status.success());
+
+    // A stale legacy conf.d file the cleanup would take back.
+    let conf_d = temp_home.path().join(".config/fish/conf.d");
+    fs::create_dir_all(&conf_d).unwrap();
+    let legacy_file = conf_d.join("wt.fish");
+    fs::write(&legacy_file, "wt config shell init fish | source").unwrap();
+
+    let mut cmd = wt_command();
+    repo.configure_wt_cmd(&mut cmd);
+    set_temp_home_env(&mut cmd, temp_home.path());
+    cmd.env("SHELL", "/bin/fish");
+    cmd.args(["config", "shell", "install", "fish", "--dry-run"])
+        .current_dir(repo.root_path());
+    let output = cmd.output().unwrap();
+    assert!(output.status.success(), "dry-run failed: {output:?}");
+
+    // The preview (stdout) must name the legacy removal.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("deprecated") && stdout.contains("conf.d"),
+        "--dry-run should preview the legacy conf.d removal:\n{stdout}"
+    );
+
+    // ...and must not actually remove anything.
+    assert!(
+        legacy_file.exists(),
+        "--dry-run must not delete legacy conf.d/wt.fish: {legacy_file:?}"
+    );
+}
+
+/// When everything is already configured, removing the legacy file needs the
+/// user's consent — declining the prompt preserves it (issue #3644).
+///
+/// The already-configured branch used to run the cleanup and return without
+/// prompting at all, deleting a hand-written `conf.d/wt.fish` as a silent side
+/// effect. Now it prompts; declining must leave the file in place.
+#[rstest]
+fn test_configure_shell_fish_legacy_removal_declined_when_already_configured(
+    repo: TestRepo,
+    temp_home: TempDir,
+) {
+    // Bootstrap the canonical location so a second install is a pure no-op except
+    // for the legacy cleanup.
+    let mut bootstrap = wt_command();
+    repo.configure_wt_cmd(&mut bootstrap);
+    set_temp_home_env(&mut bootstrap, temp_home.path());
+    bootstrap.env("SHELL", "/bin/fish");
+    bootstrap
+        .args(["config", "shell", "install", "fish", "--yes"])
+        .current_dir(repo.root_path());
+    assert!(bootstrap.output().unwrap().status.success());
+
+    let conf_d = temp_home.path().join(".config/fish/conf.d");
+    fs::create_dir_all(&conf_d).unwrap();
+    let legacy_file = conf_d.join("wt.fish");
+    fs::write(&legacy_file, "wt config shell init fish | source").unwrap();
+
+    // Run without --yes and decline the prompt.
+    let mut cmd = wt_command();
+    repo.configure_wt_cmd(&mut cmd);
+    set_temp_home_env(&mut cmd, temp_home.path());
+    cmd.env("SHELL", "/bin/fish");
+    cmd.args(["config", "shell", "install", "fish"])
+        .current_dir(repo.root_path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().unwrap();
+    use std::io::Write as _;
+    child.stdin.take().unwrap().write_all(b"n\n").unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    // Declining is a non-zero exit ("Cancelled by user"), and the file survives.
+    assert!(
+        !output.status.success(),
+        "declining should exit non-zero: {output:?}"
+    );
+    assert!(
+        legacy_file.exists(),
+        "declining must preserve legacy conf.d/wt.fish: {legacy_file:?}"
+    );
+}
+
+/// Accepting the prompt in the already-configured branch removes the legacy file
+/// (issue #3644).
+///
+/// The complement of the decline test: confirming the `Remove deprecated shell
+/// integration files?` prompt proceeds with the cleanup that used to run
+/// unprompted.
+#[rstest]
+fn test_configure_shell_fish_legacy_removal_accepted_when_already_configured(
+    repo: TestRepo,
+    temp_home: TempDir,
+) {
+    let mut bootstrap = wt_command();
+    repo.configure_wt_cmd(&mut bootstrap);
+    set_temp_home_env(&mut bootstrap, temp_home.path());
+    bootstrap.env("SHELL", "/bin/fish");
+    bootstrap
+        .args(["config", "shell", "install", "fish", "--yes"])
+        .current_dir(repo.root_path());
+    assert!(bootstrap.output().unwrap().status.success());
+
+    let conf_d = temp_home.path().join(".config/fish/conf.d");
+    fs::create_dir_all(&conf_d).unwrap();
+    let legacy_file = conf_d.join("wt.fish");
+    fs::write(&legacy_file, "wt config shell init fish | source").unwrap();
+
+    // Run without --yes and accept the prompt.
+    let mut cmd = wt_command();
+    repo.configure_wt_cmd(&mut cmd);
+    set_temp_home_env(&mut cmd, temp_home.path());
+    cmd.env("SHELL", "/bin/fish");
+    cmd.args(["config", "shell", "install", "fish"])
+        .current_dir(repo.root_path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().unwrap();
+    use std::io::Write as _;
+    child.stdin.take().unwrap().write_all(b"y\n").unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert!(
+        output.status.success(),
+        "accepting should succeed: {output:?}"
+    );
+    assert!(
+        !legacy_file.exists(),
+        "accepting must remove legacy conf.d/wt.fish: {legacy_file:?}"
     );
 }
 
@@ -1553,9 +1768,11 @@ fn test_install_uninstall_no_blank_line_accumulation(repo: TestRepo, temp_home: 
     }
 
     let after_install = fs::read_to_string(&zshrc_path).unwrap();
-    assert!(
-        after_install.contains("wt config shell init zsh"),
-        "Integration should be added"
+    assert_eq!(
+        after_install,
+        format!(
+            "{initial_content}\nif command -v wt >/dev/null 2>&1; then eval \"$(command wt config shell init zsh)\"; fi\n"
+        )
     );
 
     // Uninstall
@@ -2152,7 +2369,7 @@ fn test_uninstall_shell_dry_run_nushell(repo: TestRepo, temp_home: TempDir) {
 // PTY-based tests for interactive install preview
 #[cfg(all(unix, feature = "shell-integration-tests"))]
 mod pty_tests {
-    use crate::common::pty::exec_cmd_in_pty_prompted;
+    use crate::common::pty::{exec_cmd_in_pty_prompted, exec_cmd_in_pty_prompted_with};
     use crate::common::{
         TestRepo, add_pty_filters, configure_pty_command, repo, temp_home, wt_bin,
     };
@@ -2162,8 +2379,10 @@ mod pty_tests {
     use std::fs;
     use tempfile::TempDir;
 
-    /// Execute shell install command in a PTY, waiting for prompt before input
-    fn exec_install_in_pty(temp_home: &TempDir, repo: &TestRepo, input: &str) -> (String, i32) {
+    const ZSH_INTEGRATION: &str =
+        "if command -v wt >/dev/null 2>&1; then eval \"$(command wt config shell init zsh)\"; fi";
+
+    fn install_command(temp_home: &TempDir, repo: &TestRepo) -> CommandBuilder {
         let mut cmd = CommandBuilder::new(wt_bin());
         cmd.arg("-C");
         cmd.arg(repo.root_path());
@@ -2175,20 +2394,11 @@ mod pty_tests {
         configure_pty_command(&mut cmd);
         cmd.env("HOME", temp_home.path());
         cmd.env("XDG_CONFIG_HOME", temp_home.path().join(".config"));
-        // Treat shells as not installed by default; the test exercises the
-        // single-zsh path. Mirrors the STATIC_TEST_ENV_VARS values used by
-        // Command-based tests, applied explicitly here because
-        // configure_pty_command intentionally keeps the PTY env minimal.
-        cmd.env("WORKTRUNK_TEST_BASH_INSTALLED", "0");
-        cmd.env("WORKTRUNK_TEST_ZSH_INSTALLED", "0");
-        cmd.env("WORKTRUNK_TEST_FISH_INSTALLED", "0");
-        cmd.env("WORKTRUNK_TEST_POWERSHELL_INSTALLED", "0");
-        cmd.env("WORKTRUNK_TEST_NUSHELL_ENV", "0");
-        // Disable the process-tree shell walk so detection keys on SHELL:
-        // the real ancestry here is the test harness and whatever shell runs
-        // it (zsh on a dev box, bash on CI), which would flip the zsh-only
-        // compinit/restart output between environments.
-        cmd.env("WORKTRUNK_TEST_PARENT_SHELL", "");
+        // Detection keys on SHELL alone, which puts the test on the single-zsh
+        // path: the baseline's "not installed" and empty-parent-shell defaults
+        // rule out the host's process ancestry — the test harness and whatever
+        // shell ran it, zsh on a dev box and bash on CI, flipping the zsh-only
+        // compinit/restart output between them.
         cmd.env("SHELL", "/bin/zsh");
         // Skip the compinit probe and force the advisory to appear. The probe spawns
         // `zsh -ic` which triggers global zshrc configs that can produce "insecure
@@ -2197,7 +2407,26 @@ mod pty_tests {
         // Using MISSING=1 skips the probe while still showing the compinit advisory.
         cmd.env("WORKTRUNK_TEST_COMPINIT_MISSING", "1");
 
-        exec_cmd_in_pty_prompted(cmd, &[input], "[y/N")
+        cmd
+    }
+
+    /// Execute shell install command in a PTY, waiting for prompt before input
+    fn exec_install_in_pty(temp_home: &TempDir, repo: &TestRepo, input: &str) -> (String, i32) {
+        exec_cmd_in_pty_prompted(install_command(temp_home, repo), &[input], "[y/N")
+    }
+
+    fn uninstall_command(temp_home: &TempDir, repo: &TestRepo) -> CommandBuilder {
+        let mut cmd = CommandBuilder::new(wt_bin());
+        cmd.arg("-C");
+        cmd.arg(repo.root_path());
+        cmd.args(["config", "shell", "uninstall", "zsh"]);
+        cmd.cwd(repo.root_path());
+
+        configure_pty_command(&mut cmd);
+        cmd.env("HOME", temp_home.path());
+        cmd.env("XDG_CONFIG_HOME", temp_home.path().join(".config"));
+        cmd.env("SHELL", "/bin/zsh");
+        cmd
     }
 
     /// Create insta settings for install PTY tests.
@@ -2257,6 +2486,29 @@ mod pty_tests {
         );
     }
 
+    #[rstest]
+    fn test_install_preserves_unpreviewed_fish_completions(repo: TestRepo, temp_home: TempDir) {
+        fs::write(temp_home.path().join(".zshrc"), "# Existing config\n").unwrap();
+
+        let functions = temp_home.path().join(".config/fish/functions");
+        let completion = temp_home.path().join(".config/fish/completions/wt.fish");
+        let callback_completion = completion.clone();
+        let user_content = b"# user-owned fish completions\r\n";
+        let (output, exit_code) = exec_cmd_in_pty_prompted_with(
+            install_command(&temp_home, &repo),
+            &["y\n"],
+            "[y/N",
+            move |_| {
+                fs::create_dir_all(&functions).unwrap();
+                fs::create_dir_all(callback_completion.parent().unwrap()).unwrap();
+                fs::write(&callback_completion, user_content).unwrap();
+            },
+        );
+
+        assert_eq!(exit_code, 0, "install should succeed:\n{output}");
+        assert_eq!(fs::read(completion).unwrap(), user_content);
+    }
+
     /// Typing `?` at the install prompt re-shows the preview (the interactive
     /// re-preview path), then declining with `n` leaves the rcfile untouched.
     #[rstest]
@@ -2291,29 +2543,10 @@ mod pty_tests {
     #[rstest]
     fn test_uninstall_preview_declined(repo: TestRepo, temp_home: TempDir) {
         let zshrc_path = temp_home.path().join(".zshrc");
-        let initial = "# Existing config\nif command -v wt >/dev/null 2>&1; then eval \"$(command wt config shell init zsh)\"; fi\n";
-        fs::write(&zshrc_path, initial).unwrap();
+        let initial = format!("# Existing config\n{ZSH_INTEGRATION}\n");
+        fs::write(&zshrc_path, &initial).unwrap();
 
-        let mut cmd = CommandBuilder::new(wt_bin());
-        cmd.arg("-C");
-        cmd.arg(repo.root_path());
-        cmd.arg("config");
-        cmd.arg("shell");
-        cmd.arg("uninstall");
-        cmd.cwd(repo.root_path());
-
-        configure_pty_command(&mut cmd);
-        cmd.env("HOME", temp_home.path());
-        cmd.env("XDG_CONFIG_HOME", temp_home.path().join(".config"));
-        cmd.env("WORKTRUNK_TEST_BASH_INSTALLED", "0");
-        cmd.env("WORKTRUNK_TEST_ZSH_INSTALLED", "0");
-        cmd.env("WORKTRUNK_TEST_FISH_INSTALLED", "0");
-        cmd.env("WORKTRUNK_TEST_POWERSHELL_INSTALLED", "0");
-        cmd.env("WORKTRUNK_TEST_NUSHELL_ENV", "0");
-        // Disable the process-tree shell walk so detection keys on SHELL
-        // (see exec_install_in_pty).
-        cmd.env("WORKTRUNK_TEST_PARENT_SHELL", "");
-        cmd.env("SHELL", "/bin/zsh");
+        let cmd = uninstall_command(&temp_home, &repo);
 
         let (output, exit_code) = exec_cmd_in_pty_prompted(cmd, &["n\n"], "[y/N");
 
@@ -2328,6 +2561,53 @@ mod pty_tests {
             content, initial,
             "Declining uninstall should leave the rcfile untouched",
         );
+    }
+
+    /// The preview authorizes an exact rc-line multiplicity, not a rescan.
+    #[rstest]
+    fn test_uninstall_preserves_lines_added_after_preview(repo: TestRepo, temp_home: TempDir) {
+        let zshrc_path = temp_home.path().join(".zshrc");
+        let initial = format!("# Existing config\n{ZSH_INTEGRATION}\n");
+        fs::write(&zshrc_path, initial).unwrap();
+
+        let cmd = uninstall_command(&temp_home, &repo);
+        let callback_path = zshrc_path.clone();
+        let concurrent =
+            format!("# Existing config\n{ZSH_INTEGRATION}\n{ZSH_INTEGRATION}\nexport PAGER=less\n");
+        let (output, exit_code) = exec_cmd_in_pty_prompted_with(cmd, &["y\n"], "[y/N", move |_| {
+            fs::write(&callback_path, &concurrent).unwrap();
+        });
+
+        assert_eq!(exit_code, 0, "uninstall should succeed:\n{output}");
+        assert_eq!(
+            fs::read_to_string(&zshrc_path).unwrap(),
+            format!("# Existing config\n{ZSH_INTEGRATION}\nexport PAGER=less\n"),
+        );
+    }
+
+    #[rstest]
+    fn test_uninstall_preserves_rc_replaced_after_preview(repo: TestRepo, temp_home: TempDir) {
+        let zshrc_path = temp_home.path().join(".zshrc");
+        fs::write(&zshrc_path, format!("{ZSH_INTEGRATION}\n")).unwrap();
+
+        let cmd = uninstall_command(&temp_home, &repo);
+        let callback_path = zshrc_path.clone();
+        let replacement = b"export PAGER=less\r\n";
+        let (output, exit_code) = exec_cmd_in_pty_prompted_with(cmd, &["y\n"], "[y/N", move |_| {
+            fs::write(&callback_path, replacement).unwrap();
+        });
+
+        assert_eq!(exit_code, 0, "uninstall should succeed:\n{output}");
+        assert_eq!(fs::read(&zshrc_path).unwrap(), replacement);
+        install_pty_settings(&temp_home).bind(|| {
+            assert_snapshot!(output.trim_start_matches('\n'), @r#"
+            [2m○[22m Will remove shell extension & completions for [1mzsh[0m @ [1m~/.zshrc[0m
+            [107m [0m [2m[0m[2m[35mif[0m[2m [0m[2m[34mcommand[0m[2m [0m[2m[36m-v[0m[2m wt [0m[2m[36m>[0m[2m/dev/null [0m[2m[33m2[0m[2m>&1; [0m[2m[35mthen[0m[2m [0m[2m[34meval[0m[2m [0m[2m[32m"$([0m[2m[34mcommand[0m[2m wt config shell init zsh)"[0m[2m; [0m[2m[35mfi[0m
+
+            [36m❯[39m [36mProceed? [1m[y/N][22m[39m y
+            [33m▲[39m [33mNo shell extension & completions found in [1m~/.zshrc[22m[39m
+            "#);
+        });
     }
 }
 
@@ -2495,8 +2775,8 @@ fn test_uninstall_shell_nushell(repo: TestRepo, temp_home: TempDir) {
 /// Test that nushell uninstall cleans up the wrapper at every candidate
 /// location — the canonical vendor-autoload dir and the legacy
 /// `<config-dir>/vendor/autoload` paths older worktrunk stranded files at
-/// (issue #2878). `config_paths(Nushell)` returns all of them and uninstall
-/// iterates the full list.
+/// (issue #2878). `Shell::Nushell.config_paths(cmd)` returns all candidate
+/// locations, and uninstall checks each one.
 #[rstest]
 fn test_uninstall_nushell_cleans_all_candidate_locations(repo: TestRepo, temp_home: TempDir) {
     let home = canonical_temp_home(&temp_home);
@@ -2774,21 +3054,23 @@ fn test_nushell_install_cleans_stranded_legacy(repo: TestRepo, temp_home: TempDi
     );
 }
 
-/// Data safety: install must NOT delete a `wt.nu` at a legacy location that
-/// isn't worktrunk-managed (no worktrunk header) — it could be the user's own
-/// file. Only files carrying the worktrunk header are cleaned up (issue #2878).
+/// The stranded-file cleanup is scoped by path, so it reclaims `{cmd}.nu` at a
+/// legacy autoload dir whatever the file holds — and touches nothing else in
+/// that directory (issue #2878).
 #[rstest]
-fn test_nushell_install_keeps_unmanaged_legacy_file(repo: TestRepo, temp_home: TempDir) {
+fn test_nushell_install_reclaims_only_the_command_name(repo: TestRepo, temp_home: TempDir) {
     let home = canonical_temp_home(&temp_home);
     let autoload = home.join(".local/share/nushell/vendor/autoload");
 
-    // A user-authored wt.nu at the legacy config-dir location — no worktrunk
-    // header, so it must be left untouched.
     let legacy_dir = home.join(".config/nushell/vendor/autoload");
     fs::create_dir_all(&legacy_dir).unwrap();
+    // No worktrunk header: the path is what makes it worktrunk's.
     let legacy = legacy_dir.join("wt.nu");
-    let user_content = "# my own wt helper\ndef wt [] { echo hi }\n";
-    fs::write(&legacy, user_content).unwrap();
+    fs::write(&legacy, "def wt [] { echo hi }\n").unwrap();
+    // A neighbour under another name stays put.
+    let neighbour = legacy_dir.join("helpers.nu");
+    let neighbour_content = "def hi [] { echo hi }\n";
+    fs::write(&neighbour, neighbour_content).unwrap();
 
     let mut cmd = wt_command();
     repo.configure_wt_cmd(&mut cmd);
@@ -2805,16 +3087,15 @@ fn test_nushell_install_keeps_unmanaged_legacy_file(repo: TestRepo, temp_home: T
         String::from_utf8_lossy(&output.stderr)
     );
 
-    // Canonical wrapper written, user's legacy file preserved verbatim.
     assert!(autoload.join("wt.nu").exists(), "canonical wrapper missing");
     assert!(
-        legacy.exists(),
-        "unmanaged legacy wt.nu must be preserved: {legacy:?}"
+        !legacy.exists(),
+        "install should reclaim the legacy wt.nu: {legacy:?}"
     );
     assert_eq!(
-        fs::read_to_string(&legacy).unwrap(),
-        user_content,
-        "unmanaged legacy file must be left unchanged"
+        fs::read_to_string(&neighbour).unwrap(),
+        neighbour_content,
+        "a legacy-dir file under another name is not worktrunk's"
     );
 }
 

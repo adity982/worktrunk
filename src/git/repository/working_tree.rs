@@ -4,13 +4,29 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use dashmap::mapref::entry::Entry;
+use path_slash::PathExt;
 
+use crate::path::canonicalize_with_parents;
 use crate::shell_exec::Cmd;
 use dunce::canonicalize;
 
 use super::{GitError, LineDiff, Repository};
 use crate::git::CommandError;
 use crate::git::parse_numstat_line;
+
+const TEMP_INDEX_PREFIX: &str = "worktrunk-temp-index-";
+
+/// Quote a path component for Git's `glob` pathspec magic. The caller adds
+/// the one intentional wildcard after the escaped literal.
+fn escape_pathspec_glob_literal(path: &str) -> String {
+    path.chars().fold(String::new(), |mut escaped, ch| {
+        if matches!(ch, '\\' | '*' | '?' | '[' | ']') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+        escaped
+    })
+}
 
 /// Parse `git submodule status` output and detect whether any submodule is initialized.
 ///
@@ -69,6 +85,31 @@ fn sequencer_operation(git_dir: &Path) -> Option<InProgressOperation> {
         "revert" => Some(InProgressOperation::Revert),
         _ => None,
     }
+}
+
+/// The working tree a `<common>/worktrees/<id>` registration records, read from
+/// its `gitdir` file.
+///
+/// The file holds the path of that working tree's `.git`, absolute or relative to
+/// the registration directory — git writes the relative form under
+/// `worktree.useRelativePaths` and resolves either, so both are ordinary. Its
+/// parent is the working tree, which is the half of git's `validate_worktree`
+/// that reads from the registration side.
+///
+/// Resolved through [`canonicalize_with_parents`], which normalizes the `..`
+/// chain a relative entry leaves behind even though the directory it names may
+/// no longer exist — the case the caller is usually asking about, and the path it
+/// then shows the user. Normalizing rewrites spellings only, so it cannot make
+/// two directories compare equal.
+fn registration_worktree_path(registration: &Path) -> Option<PathBuf> {
+    let content = std::fs::read_to_string(registration.join("gitdir")).ok()?;
+    let recorded = PathBuf::from(content.trim());
+    let absolute = if recorded.is_relative() {
+        registration.join(recorded)
+    } else {
+        recorded
+    };
+    absolute.parent().map(canonicalize_with_parents)
 }
 
 /// Typed snapshot returned by [`WorkingTree::prewarm_info`].
@@ -360,12 +401,19 @@ impl<'a> WorkingTree<'a> {
     /// each want porcelain (e.g., working-tree diff + conflict detection during
     /// `wt list`) share a single subprocess. Uses `--no-optional-locks` to avoid
     /// index-lock contention with the `git write-tree` run by
-    /// `WorkingTreeConflictsTask` in parallel.
+    /// `WorkingTreeConflictsTask` in parallel. Explicitly requests normal
+    /// untracked-file reporting so `status.showUntrackedFiles=no` cannot make
+    /// an untracked-only worktree look clean to callers.
     pub fn status_porcelain_cached(&self) -> anyhow::Result<String> {
         match self.repo.cache.status_porcelain.entry(self.path.clone()) {
             Entry::Occupied(e) => Ok(e.get().clone()),
             Entry::Vacant(e) => {
-                let stdout = self.run_command(&["--no-optional-locks", "status", "--porcelain"])?;
+                let stdout = self.run_command(&[
+                    "--no-optional-locks",
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=normal",
+                ])?;
                 Ok(e.insert(stdout).clone())
             }
         }
@@ -520,8 +568,10 @@ impl<'a> WorkingTree<'a> {
     /// with it. Asking before staging is what keeps the markers out of a
     /// commit.
     ///
-    /// `action` names the command the user typed, so each entry point gates in
-    /// its own name rather than in the name of a step it delegates to.
+    /// `action` names the command the user typed. An entry point knows only
+    /// that, and often not yet whether it will commit at all —
+    /// `wt merge --no-commit` resolves its flags after this gate — so it
+    /// refuses in the name of the operation it was asked for.
     ///
     /// Every one of those gates refuses *early* — ahead of hooks, approval
     /// prompts, and the LLM call, none of which is worth running for a commit
@@ -560,27 +610,21 @@ impl<'a> WorkingTree<'a> {
     /// commands — and those hooks are arbitrary project code, free to leave
     /// unmerged paths behind after that gate has passed.
     ///
+    /// The refusal names the commit rather than taking an `action` from the
+    /// caller, because the commit is the only thing this gate guards — staging
+    /// on the user's behalf happens for no other reason. So
+    /// `wt merge --no-squash` reports `Cannot commit` even though the user
+    /// typed `merge`: that is the step actually blocked, and by then the flags
+    /// have resolved and the commit is certain.
+    ///
     /// [`StageMode::None`] stages nothing but is still gated: the caller is
     /// about to commit whatever the index already holds.
     ///
     /// [`StageMode::None`]: crate::config::StageMode::None
-    pub fn stage(&self, mode: crate::config::StageMode, action: &str) -> anyhow::Result<()> {
-        use crate::config::StageMode;
-
-        self.ensure_no_unmerged_paths(action)?;
-        match mode {
-            // Stage everything: tracked modifications + untracked files
-            StageMode::All => {
-                self.run_command(&["add", "-A"])
-                    .context("Failed to stage changes")?;
-            }
-            // Stage tracked modifications only (no untracked files)
-            StageMode::Tracked => {
-                self.run_command(&["add", "-u"])
-                    .context("Failed to stage tracked changes")?;
-            }
-            // Commit only what is already in the index
-            StageMode::None => {}
+    pub fn stage(&self, mode: crate::config::StageMode) -> anyhow::Result<()> {
+        self.ensure_no_unmerged_paths("commit")?;
+        if let Some(args) = mode.add_args() {
+            self.run_command(args).context("Failed to stage changes")?;
         }
         Ok(())
     }
@@ -599,6 +643,76 @@ impl<'a> WorkingTree<'a> {
         let git_dir = self.git_dir()?;
         let common_dir = self.repo.git_common_dir();
         Ok(git_dir != common_dir)
+    }
+
+    /// Refuse when the directory at this worktree's path does not hold this
+    /// worktree.
+    ///
+    /// Git makes this check itself before `git worktree remove` and refuses
+    /// with `validation failed … does not point back to
+    /// '.git/worktrees/<id>'`, `--force` included. Worktrunk's removal fast
+    /// path renames the directory into trash rather than asking git to (see
+    /// [`stage_worktree_removal`](crate::git::remove::stage_worktree_removal)),
+    /// so git's validation never runs and the guarantee has to be made here.
+    /// Removing the wrong directory is unrecoverable, whether it holds a full
+    /// clone that came to sit at a stale registration's path (uncommitted work
+    /// and, for a repo never pushed, the only copy of its objects) or a sibling
+    /// worktree of this repository, moved onto the path after this one was
+    /// deleted.
+    ///
+    /// So the test is git's own: the directory's `.git` must name *this
+    /// registration*, and that registration's `gitdir` file must name this
+    /// directory back (`registration_worktree_path`). Repository-level
+    /// ownership is the weaker half: a sibling worktree's git dir sits under
+    /// `<common>/worktrees/` too, so asking only which repository the occupant
+    /// answers to accepts one moved onto this path. The main worktree is the
+    /// same test where there is no registration to point back at: its git dir
+    /// *is* the common dir, and that equality is the whole of it.
+    ///
+    /// Resolution reads the `.git` entry in this directory on every call
+    /// (`Repository::git_dir_at`) instead of going through the `GIT_DIRS`-cached
+    /// [`git_dir`](Self::git_dir), which would answer from whenever an earlier
+    /// caller asked. That is what makes the second call worth making: removal
+    /// gates at planning and again at the rename, with the approval prompt and
+    /// the `pre-remove` hook running in between.
+    ///
+    /// Deliberately not a `prunable` check — git leaves the registration alone
+    /// precisely because the occupant's own `.git` resolves, so
+    /// [`Repository::usable_worktree_for_branch`] sees nothing wrong here. The
+    /// two cover different halves of "the directory no longer holds this
+    /// worktree": prunable is the half git notices, this is the half it does
+    /// not.
+    pub fn ensure_holds_this_worktree(&self) -> anyhow::Result<()> {
+        let common_dir = self.repo.git_common_dir();
+        // A git dir that can't be resolved at all is the strongest form of "not
+        // this worktree": nothing there answers for it. Treating that as a
+        // refusal keeps the failure closed.
+        let git_dir = Repository::git_dir_at(&self.path);
+        if git_dir.as_deref() == Some(common_dir) {
+            return Ok(());
+        }
+
+        // Where the occupant's own registration says it lives. `None` when there
+        // is no registration of ours to ask — the occupant answers to a
+        // different repository, or its registration here has lost its `gitdir`
+        // file.
+        let registrations = common_dir.join("worktrees");
+        let occupant_registered_at = git_dir
+            .filter(|git_dir| git_dir.parent() == Some(registrations.as_path()))
+            .as_deref()
+            .and_then(registration_worktree_path);
+        if occupant_registered_at
+            .as_deref()
+            .is_some_and(|recorded| crate::path::paths_match(recorded, &self.path))
+        {
+            return Ok(());
+        }
+
+        Err(GitError::WorktreePathNotOurs {
+            path: self.path.clone(),
+            occupant_registered_at,
+        }
+        .into())
     }
 
     /// Ensure this worktree is clean (no uncommitted changes).
@@ -671,19 +785,13 @@ impl<'a> WorkingTree<'a> {
         }
 
         let idx = self.temp_index()?;
-        let add_output = idx
-            .git(["add", "--pathspec-from-file=-", "--pathspec-file-nul"])
-            .stdin_bytes(output.stdout)
-            .run()
-            .context("Failed to stage untracked files")?;
-        if !add_output.status.success() {
-            return Err(CommandError::from_failed_output(
-                "git",
-                &["add", "--pathspec-from-file=-", "--pathspec-file-nul"],
-                &add_output,
-            )
-            .into());
-        }
+        let add_args = [
+            "add",
+            "--sparse",
+            "--pathspec-from-file=-",
+            "--pathspec-file-nul",
+        ];
+        idx.run_command_with_input(add_args, output.stdout)?;
 
         let mut args = vec![
             "diff".to_string(),
@@ -693,16 +801,10 @@ impl<'a> WorkingTree<'a> {
             "--".to_string(),
         ];
         args.extend(paths);
-        let output = idx
-            .git(&args)
-            .run()
-            .context("Failed to compute untracked diff stats")?;
-        if !output.status.success() {
-            return Err(CommandError::from_failed_output("git", &args, &output).into());
-        }
+        let output = idx.run_command(&args)?;
 
         let mut stats = LineDiff::default();
-        for line in String::from_utf8_lossy(&output.stdout).lines() {
+        for line in output.lines() {
             if let Some((added, deleted)) = parse_numstat_line(line) {
                 stats.added += added;
                 stats.deleted += deleted;
@@ -720,23 +822,30 @@ impl<'a> WorkingTree<'a> {
         let real_index = git_dir.join("index");
         let log_ctx = path_to_logging_context(self.path());
 
-        // A missing `<gitdir>/index` is semantically an empty index (nothing
-        // staged), so mirror git's own behaviour. Close the
-        // freshly-created 0-byte tempfile's handle (Windows leaves the name
-        // delete-pending if it's still open) and remove the file; if a real
-        // index exists, copy it back, otherwise leave the path empty and
-        // let the first `git` call against `GIT_INDEX_FILE` create a fresh
-        // valid index there.
-        let temp = tempfile::NamedTempFile::new()
-            .context("Failed to create temporary index")?
-            .into_temp_path();
-        std::fs::remove_file(&temp).context("Failed to clear temporary index")?;
-        if real_index.exists() {
-            std::fs::copy(&real_index, &temp).context("Failed to copy index file")?;
+        // Keep the exclusively-created file open while copying a real index;
+        // removing it first would expose its random name to a symlink race in
+        // a shared system temp directory. A missing `<gitdir>/index` is
+        // semantically an empty index (nothing staged), so only that case
+        // closes and removes the 0-byte file before Git creates a valid index.
+        let mut temp_file = tempfile::Builder::new()
+            .prefix(TEMP_INDEX_PREFIX)
+            .tempfile()
+            .context("Failed to create temporary index")?;
+        let mut real_index_file = match std::fs::File::open(&real_index) {
+            Ok(file) => Some(file),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error).context("Failed to open index file"),
+        };
+        if let Some(real_index_file) = &mut real_index_file {
+            std::io::copy(real_index_file, temp_file.as_file_mut())
+                .context("Failed to copy index file")?;
         }
-        // Validate UTF-8 once so `TempIndex::path` is infallible.
-        temp.to_str()
-            .context("Temporary index path is not valid UTF-8")?;
+        let temp = temp_file.into_temp_path();
+        if real_index_file.is_none() {
+            // `into_temp_path` closes the handle first, which matters on
+            // Windows: deleting a still-open file leaves the name pending.
+            std::fs::remove_file(&temp).context("Failed to clear temporary index")?;
+        }
 
         Ok(TempIndex {
             temp,
@@ -746,6 +855,18 @@ impl<'a> WorkingTree<'a> {
                 |(directory, alternates)| (directory.to_path_buf(), alternates.to_os_string()),
             ),
         })
+    }
+
+    /// Write a tree containing the index plus every working-tree change.
+    ///
+    /// A temporary index keeps the user's staging state unchanged. `--sparse`
+    /// is intentional here: this is a complete worktree snapshot for conflict
+    /// detection, so untracked files outside a sparse-checkout definition must
+    /// participate too.
+    pub fn write_worktree_tree(&self) -> anyhow::Result<String> {
+        let index = self.temp_index()?;
+        index.stage_worktree_snapshot()?;
+        index.write_tree()
     }
 
     /// Determine whether there are staged changes in the index.
@@ -847,8 +968,9 @@ impl<'a> WorkingTree<'a> {
 /// [`WorkingTree::working_tree_diff_stats_with_untracked`] (HEAD± with
 /// untracked, used by `wt list --full` / `wt statusline`),
 /// `WorkingTreeConflictsTask` (write-tree of dirty + untracked, for
-/// merge-conflict probing), and `wt step diff` (diff vs target merge-base
-/// with untracked).
+/// merge-conflict probing), `wt step diff` (diff vs target merge-base with
+/// untracked), `wt step commit --dry-run` (mirror its `--stage` mode without
+/// changing the user's index), and the `wt switch` unified/working preview tabs.
 pub struct TempIndex {
     temp: tempfile::TempPath,
     worktree_root: PathBuf,
@@ -860,9 +982,117 @@ pub struct TempIndex {
 }
 
 impl TempIndex {
-    /// UTF-8 path to the temp index file. Validated at construction.
-    pub fn path(&self) -> &str {
-        self.temp.to_str().expect("validated in temp_index()")
+    /// Path to the temporary index file.
+    pub fn path(&self) -> &Path {
+        &self.temp
+    }
+
+    /// Stage the paths selected by `mode` into this temporary index.
+    ///
+    /// Uses the same `git add` mode as [`WorkingTree::stage`], minus its
+    /// unmerged-paths gate. All-files mode also scopes the add to the worktree
+    /// root (`-- .`) and, when the system temp directory sits inside the
+    /// worktree, excludes Worktrunk's own temporary indexes.
+    ///
+    /// [`StageMode`]: crate::config::StageMode
+    pub fn stage(&self, mode: crate::config::StageMode) -> anyhow::Result<()> {
+        let Some(add_args) = mode.add_args() else {
+            return Ok(());
+        };
+        let mut args: Vec<String> = add_args.iter().map(|arg| (*arg).to_string()).collect();
+        if mode == crate::config::StageMode::All {
+            args.extend(["--".to_string(), ".".to_string()]);
+            self.append_temp_index_exclusion(&mut args)?;
+        }
+        self.run_command(args)?;
+        Ok(())
+    }
+
+    /// Stage a complete working-tree snapshot, crossing sparse boundaries.
+    fn stage_worktree_snapshot(&self) -> anyhow::Result<()> {
+        let mut args = vec![
+            "add".to_string(),
+            "-A".to_string(),
+            "--sparse".to_string(),
+            "--".to_string(),
+            ".".to_string(),
+        ];
+        self.append_temp_index_exclusion(&mut args)?;
+        self.run_command(args)?;
+        Ok(())
+    }
+
+    /// Write the temporary index as a tree and return its object id.
+    fn write_tree(&self) -> anyhow::Result<String> {
+        self.run_command(["write-tree"])
+            .map(|output| output.trim().to_string())
+    }
+
+    /// Register untracked files in the temporary index without adding their
+    /// contents. A following `git diff <base>` can then include those files as
+    /// new while preserving the user's real index and staging state. If the
+    /// system temp directory is inside the worktree, the pathspec excludes all
+    /// files in that directory with Worktrunk's dedicated prefix so concurrent
+    /// temporary indexes cannot enter each other's diffs. Keeping the random
+    /// files directly in the OS temp directory avoids a predictable shared
+    /// parent on multi-user systems.
+    pub(super) fn register_untracked(&self) -> anyhow::Result<()> {
+        let mut args = vec![
+            "add".to_string(),
+            "--intent-to-add".to_string(),
+            // An untracked file may sit outside a sparse-checkout definition.
+            // Without --sparse git refuses the entire add, hiding both that
+            // file and otherwise-valid worktree changes from the preview.
+            "--sparse".to_string(),
+            "--".to_string(),
+            ".".to_string(),
+        ];
+        self.append_temp_index_exclusion(&mut args)?;
+        self.run_command(args)?;
+        Ok(())
+    }
+
+    fn append_temp_index_exclusion(&self, args: &mut Vec<String>) -> anyhow::Result<()> {
+        let temp_dir = canonicalize_with_parents(
+            self.temp
+                .parent()
+                .context("Temporary index has no parent directory")?,
+        );
+        let worktree_root = canonicalize_with_parents(&self.worktree_root);
+        if let Ok(relative) = temp_dir.strip_prefix(&worktree_root) {
+            let relative = escape_pathspec_glob_literal(&relative.to_slash_lossy());
+            let separator = if relative.is_empty() { "" } else { "/" };
+            args.push(format!(
+                ":(top,exclude,glob){relative}{separator}{TEMP_INDEX_PREFIX}*"
+            ));
+        }
+        Ok(())
+    }
+
+    fn run_command(
+        &self,
+        args: impl IntoIterator<Item = impl Into<String>>,
+    ) -> anyhow::Result<String> {
+        self.run_command_with_input(args, Vec::new())
+    }
+
+    fn run_command_with_input(
+        &self,
+        args: impl IntoIterator<Item = impl Into<String>>,
+        stdin: Vec<u8>,
+    ) -> anyhow::Result<String> {
+        let args: Vec<String> = args.into_iter().map(Into::into).collect();
+        let mut command = self.command(args.iter().cloned());
+        if !stdin.is_empty() {
+            command = command.stdin_bytes(stdin);
+        }
+        let output = command
+            .run()
+            .with_context(|| format!("Failed to execute: git {}", args.join(" ")))?;
+        if !output.status.success() {
+            return Err(CommandError::from_failed_output("git", &args, &output).into());
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
     /// Build a `git` command pointed at this temp index.
@@ -870,7 +1100,7 @@ impl TempIndex {
     /// Wires `current_dir` to the worktree root, the worktree's logging
     /// context, and `GIT_INDEX_FILE`. The caller adds the subcommand and
     /// chooses `.run()` / `.stream()`.
-    pub fn git<I, S>(&self, args: I) -> Cmd
+    pub(super) fn command<I, S>(&self, args: I) -> Cmd
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
@@ -958,6 +1188,21 @@ mod tests {
             .unwrap()
             .expect("HEAD still resolved after second commit");
         assert_ne!(before, after, "head_sha must reflect the new commit");
+    }
+
+    #[test]
+    fn cached_porcelain_reports_untracked_files_hidden_by_user_config() {
+        let test = TestRepo::with_initial_commit();
+        test.run_git(&["config", "status.showUntrackedFiles", "no"]);
+        std::fs::write(test.root_path().join("hidden-by-config.txt"), "loose\n").unwrap();
+
+        let repo = Repository::at(test.root_path()).unwrap();
+        let status = repo.current_worktree().status_porcelain_cached().unwrap();
+
+        assert!(
+            status.contains("?? hidden-by-config.txt"),
+            "the shared status snapshot must override status.showUntrackedFiles=no: {status:?}"
+        );
     }
 
     #[test]
@@ -1118,6 +1363,65 @@ mod tests {
         );
     }
 
+    fn sparse_checkout_with_untracked_file() -> TestRepo {
+        let test = TestRepo::with_initial_commit();
+        std::fs::create_dir_all(test.root_path().join("visible")).unwrap();
+        std::fs::create_dir_all(test.root_path().join("hidden")).unwrap();
+        std::fs::write(test.root_path().join("visible/tracked.txt"), "base\n").unwrap();
+        std::fs::write(test.root_path().join("hidden/tracked.txt"), "base\n").unwrap();
+        test.run_git(&["add", "visible/tracked.txt", "hidden/tracked.txt"]);
+        test.run_git(&["commit", "-m", "add sparse fixture"]);
+        test.run_git(&["sparse-checkout", "init", "--cone"]);
+        test.run_git(&["sparse-checkout", "set", "visible"]);
+
+        std::fs::create_dir_all(test.root_path().join("hidden")).unwrap();
+        std::fs::write(test.root_path().join("hidden/loose.txt"), "loose\n").unwrap();
+
+        test
+    }
+
+    #[test]
+    fn untracked_diff_stats_crosses_sparse_checkout_boundary() {
+        let test = sparse_checkout_with_untracked_file();
+
+        let repo = Repository::at(test.root_path()).unwrap();
+        let stats = repo.current_worktree().untracked_diff_stats().unwrap();
+        assert_eq!(stats.added, 1);
+        assert_eq!(stats.deleted, 0);
+    }
+
+    #[test]
+    fn temp_index_stage_all_preserves_sparse_checkout_boundary() {
+        let test = sparse_checkout_with_untracked_file();
+
+        let repo = Repository::at(test.root_path()).unwrap();
+        let idx = repo.current_worktree().temp_index().unwrap();
+        let err = idx
+            .stage(crate::config::StageMode::All)
+            .expect_err("temporary staging must mirror real git add -A");
+        let cmd_err = crate::git::CommandError::find_in(&err)
+            .expect("sparse-boundary refusal should remain a CommandError");
+        assert_eq!(cmd_err.command_string(), "git add -A -- .");
+    }
+
+    #[test]
+    fn write_worktree_tree_crosses_sparse_checkout_boundary() {
+        let test = sparse_checkout_with_untracked_file();
+
+        let repo = Repository::at(test.root_path()).unwrap();
+        let tree = repo.current_worktree().write_worktree_tree().unwrap();
+        let files = test.git_output(&["ls-tree", "-r", "--name-only", &tree]);
+        assert_eq!(
+            files.lines().collect::<Vec<_>>(),
+            [
+                "file.txt",
+                "hidden/loose.txt",
+                "hidden/tracked.txt",
+                "visible/tracked.txt",
+            ]
+        );
+    }
+
     #[test]
     fn untracked_diff_stats_unborn_head_is_command_error() {
         // With an unborn HEAD the untracked files stage fine into the temp
@@ -1161,11 +1465,8 @@ mod tests {
 
         // (b) git add -A against the resulting temp index produces a tree
         // containing the working-tree files.
-        idx.git(["add", "-A"]).run().unwrap();
-        let write_tree = idx.git(["write-tree"]).run().unwrap();
-        let tree_sha = String::from_utf8_lossy(&write_tree.stdout)
-            .trim()
-            .to_string();
+        idx.stage(crate::config::StageMode::All).unwrap();
+        let tree_sha = idx.write_tree().unwrap();
         let ls_tree = Cmd::new("git")
             .args(["ls-tree", "-r", "--name-only", &tree_sha])
             .current_dir(test.root_path())

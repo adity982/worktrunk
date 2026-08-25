@@ -6,7 +6,7 @@ Worktrees are addressed by branch name; paths are computed from a configurable t
 
 ## Examples
 
-```bash
+```console
 $ wt switch feature-auth           # Switch to worktree
 $ wt switch -                      # Previous worktree (like cd -)
 $ wt switch --create new-feature   # Create new branch and worktree
@@ -29,12 +29,16 @@ If the branch already has a worktree, `wt switch` changes directories to it. Oth
 4. Runs [pre-start hooks](https://worktrunk.dev/hook/#hook-types), blocking until complete
 5. Spawns [post-start](https://worktrunk.dev/hook/#hook-types) and [post-switch hooks](https://worktrunk.dev/hook/#hook-types) in the background
 
-```bash
+```console
 $ wt switch feature                        # Existing branch → creates worktree
 $ wt switch --create feature               # New branch and worktree
 $ wt switch --create fix --base release    # New branch from release
 $ wt switch --create temp --no-hooks       # Skip hooks
 ```
+
+## Naming a worktree
+
+Worktrees are addressed by branch name, and every argument that takes one also accepts the path of the worktree itself — resolved after the branch, so a directory never shadows a branch sharing its name. A path names what a branch cannot: a detached worktree, or one of two checkouts of the same branch. Relative paths resolve against `-C` and a leading `~` against the home directory, so a path worktrunk printed can be pasted back.
 
 ## Shortcuts
 
@@ -46,7 +50,7 @@ $ wt switch --create temp --no-hooks       # Skip hooks
 | `pr:{N}` | GitHub PR #N's branch |
 | `mr:{N}` | GitLab MR !N's branch |
 
-```bash
+```console
 $ wt switch -                           # Back to previous
 $ wt switch ^                           # Default branch worktree
 $ wt switch --create fix --base=@       # Branch from current HEAD
@@ -71,13 +75,13 @@ The CI column shows each row's PR/MR CI and review status, the same as [`wt list
 | (type) | Filter worktrees |
 | `Enter` | Switch to selected worktree |
 | `Alt-c` | Create new worktree named as entered text |
-| `Alt-x` | Remove selected worktree/branch |
+| `Alt-x` | Remove selected worktree/branch (never forces) |
 | `Alt-y` | Copy selected branch name to the clipboard |
 | `Alt-o` | Open the selected row's PR/MR URL in the browser |
 | `Alt-r` | Refresh the list (pick up worktrees created elsewhere) |
 | `Esc` | Cancel |
-| `Alt-1`–`Alt-7` | Jump to a preview tab |
-| `Tab`/`Shift-Tab` | Cycle preview tabs forward/backward |
+| `Alt-1`–`Alt-8` | Jump to a preview tab |
+| `Tab`/`Shift-Tab` | Cycle available preview tabs forward/backward |
 | `Alt-p` | Toggle preview panel |
 | `Ctrl-u`/`Ctrl-d` | Scroll preview up/down |
 
@@ -91,13 +95,16 @@ Typing a gutter sigil filters by row kind: `+` narrows to linked worktrees and `
 
 **Preview tabs:**
 
-1. **HEAD±** — Diff of uncommitted changes
-2. **log** — Recent commits; commits already on the default branch have dimmed hashes
-3. **main…±** — Diff of changes since the merge-base with the default branch
-4. **remote⇅** — Ahead/behind diff vs upstream tracking branch
-5. **summary** — LLM-generated branch summary; requires `[list] summary = true` and [`commit.generation`](https://worktrunk.dev/config/#commit)
-6. **pr** — The selected row's PR/MR, for any row whose branch has one
-7. **comments** — The PR/MR's comment thread, fetched from the forge on `--prs` rows
+1. **diff** — One net diff from the comparison base through the current worktree: committed, staged, unstaged, and untracked changes
+2. **working** — Staged, unstaged, and untracked changes against `HEAD`
+3. **committed** — Committed changes since the comparison base
+4. **log** — Recent commits; commits already on the default branch have dimmed hashes
+5. **remote⇅** — Ahead/behind diff vs upstream tracking branch
+6. **summary** — LLM-generated branch summary; requires `[list] summary = true` and [`commit.generation`](https://worktrunk.dev/config/#commit)
+7. **pr** — The selected row's PR/MR, for any row whose branch has one
+8. **comments** — The PR/MR's comment thread, fetched from the forge for any row whose branch has one
+
+The comparison base is the merge-base with the default branch, or with its upstream when the local default branch lags. The picker opens on **diff** for local rows and **pr** for a PR/MR listed by `--prs` but not available locally. `Tab` and `Shift-Tab` skip tabs without content; `Alt-1` through `Alt-8` open any tab directly. After you choose a tab, that choice stays active while you navigate.
 
 On narrow previews the tab bar compacts to digits — only the active tab keeps its label — so every `Alt-N` accelerator stays visible.
 
@@ -112,7 +119,7 @@ pager = "delta --paging=never --width=$COLUMNS"
 
 The `pr:<number>` / `mr:<number>` shortcut and the PR/MR's web URL both resolve to its branch. For same-repo PRs/MRs, worktrunk switches to the branch directly. For fork PRs/MRs, it fetches the ref (`refs/pull/N/head` or `refs/merge-requests/N/head`) and configures `pushRemote` to the fork URL.
 
-```bash
+```console
 $ wt switch pr:101                                  # GitHub PR #101
 $ wt switch https://github.com/owner/repo/pull/101  # ...the same PR, by URL
 $ wt switch mr:101                                  # GitLab MR !101
@@ -145,7 +152,7 @@ Usage: wt switch [OPTIONS] [BRANCH] [-- <EXECUTE_ARGS>...]
 
 Arguments:
   [BRANCH]
-          Branch name, shortcut, or PR/MR URL
+          Branch, worktree path, shortcut, or PR/MR URL
 
           Opens interactive picker if omitted. Shortcuts: ^ (default branch), - (previous), @
           (current), pr:{N} (GitHub PR), mr:{N} (GitLab MR)
@@ -177,7 +184,8 @@ Options:
           there.
 
           Supports hook template variables ({{ branch }}, {{ worktree_path }}, etc.) and filters. {{
-          base }} and {{ base_worktree_path }} require --create.
+          base }} and {{ base_worktree_path }} describe the source: the selected base with --create,
+          or the invoking worktree when switching to an existing worktree.
 
           Especially useful with shell aliases:
 

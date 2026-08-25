@@ -84,6 +84,7 @@ use worktrunk::styling::{
 };
 
 use crate::cli::{OutputFormat, SwitchFormat};
+use crate::output::print_json;
 use crate::output::prompt::{PromptResponse, prompt_yes_no_preview};
 use worktrunk::utils::epoch_now;
 
@@ -634,7 +635,7 @@ pub fn handle_logs_list(format: SwitchFormat) -> anyhow::Result<()> {
             "hook_output": hook_output,
             "diagnostic": diagnostic,
         });
-        println!("{}", serde_json::to_string_pretty(&output)?);
+        print_json(&output)?;
         return Ok(());
     }
 
@@ -689,7 +690,7 @@ pub fn handle_logs_profile(file: Option<PathBuf>, format: SwitchFormat) -> anyho
     let profile = worktrunk::trace::Profile::from_entries(&entries);
 
     if format == SwitchFormat::Json {
-        println!("{}", serde_json::to_string_pretty(&profile)?);
+        print_json(&profile)?;
     } else {
         show_help_in_pager(&profile.render_text(&source), true);
     }
@@ -723,7 +724,7 @@ pub fn handle_state_get(
         },
         "marker" => {
             let branch_name = match branch {
-                Some(b) => b,
+                Some(b) => repo.require_selected_branch(&b, "get marker")?,
                 None => repo.require_current_branch("get marker for current branch")?,
             };
             if format == SwitchFormat::Json {
@@ -746,7 +747,7 @@ pub fn handle_state_get(
                     }
                     None => serde_json::json!(null),
                 };
-                println!("{}", serde_json::to_string_pretty(&output)?);
+                print_json(&output)?;
             } else {
                 match repo.branch_marker(&branch_name) {
                     Some(marker) => println!("{marker}"),
@@ -756,7 +757,7 @@ pub fn handle_state_get(
         }
         "ci-status" => {
             let branch_name = match branch {
-                Some(b) => b,
+                Some(b) => repo.require_selected_branch(&b, "get ci-status")?,
                 None => repo.require_current_branch("get ci-status for current branch")?,
             };
 
@@ -791,8 +792,10 @@ pub fn handle_state_get(
                 (None, Some(sha)) => BranchRef::remote_branch(&branch_name, sha),
                 (None, None) => {
                     return Err(worktrunk::git::GitError::BranchNotFound {
+                        // Offering `--create` for a name git rejects sends the
+                        // user to a command that fails.
+                        show_create_hint: worktrunk::git::is_valid_branch_name(&branch_name),
                         branch: branch_name,
-                        show_create_hint: true,
                         last_fetch_ago: None,
                         pr_mr_platform: repo.detect_ref_type(),
                     }
@@ -804,14 +807,14 @@ pub fn handle_state_get(
                 .and_then(|ci_branch| PrStatus::detect(&repo, &ci_branch, &branch_ref.commit_sha));
 
             if format == SwitchFormat::Json {
-                let ci_provider_override = repo.forge_platform_override();
+                let ci_provider_override = repo.configured_forge_platform();
                 let output = pr_status.as_ref().map(|pr| {
                     super::super::list::json_output::JsonCi::from_pr_status(
                         pr,
                         ci_provider_override.as_deref(),
                     )
                 });
-                println!("{}", serde_json::to_string_pretty(&output)?);
+                print_json(&output)?;
             } else {
                 let ci_status = pr_status
                     .map_or(super::super::list::ci_status::CiStatus::NoCI, |s| {
@@ -859,7 +862,7 @@ pub fn handle_state_set(key: &str, value: String, branch: Option<String>) -> any
         }
         "marker" => {
             let branch_name = match branch {
-                Some(b) => b,
+                Some(b) => repo.require_selected_branch(&b, "set marker")?,
                 None => repo.require_current_branch("set marker for current branch")?,
             };
 
@@ -917,7 +920,7 @@ pub fn handle_state_clear(key: &str, branch: Option<String>, all: bool) -> anyho
             } else {
                 // Clear CI status for specific branch
                 let branch_name = match branch {
-                    Some(b) => b,
+                    Some(b) => repo.require_selected_branch(&b, "clear ci-status")?,
                     None => repo.require_current_branch("clear ci-status for current branch")?,
                 };
                 if CachedCiStatus::clear_one(&repo, &branch_name)? {
@@ -949,7 +952,7 @@ pub fn handle_state_clear(key: &str, branch: Option<String>, all: bool) -> anyho
                 }
             } else {
                 let branch_name = match branch {
-                    Some(b) => b,
+                    Some(b) => repo.require_selected_branch(&b, "clear marker")?,
                     None => repo.require_current_branch("clear marker for current branch")?,
                 };
 
@@ -1077,51 +1080,42 @@ fn clear_previous_branch_reported(repo: &Repository) -> anyhow::Result<bool> {
     Ok(false)
 }
 
-fn clear_markers_reported(repo: &Repository) -> anyhow::Result<bool> {
-    let cleared = clear_all_markers(repo)?;
-    if cleared > 0 {
-        eprintln!(
-            "{}",
-            success_message(cformat!(
-                "Cleared <bold>{cleared}</> marker{}",
-                if cleared == 1 { "" } else { "s" }
-            ))
-        );
-        return Ok(true);
+fn report_cleared_count(cleared: usize, singular: &str, plural: &str) -> bool {
+    if cleared == 0 {
+        return false;
     }
-    Ok(false)
+    let noun = if cleared == 1 { singular } else { plural };
+    eprintln!(
+        "{}",
+        success_message(cformat!("Cleared <bold>{cleared}</> {noun}"))
+    );
+    true
+}
+
+fn clear_markers_reported(repo: &Repository) -> anyhow::Result<bool> {
+    Ok(report_cleared_count(
+        clear_all_markers(repo)?,
+        "marker",
+        "markers",
+    ))
 }
 
 fn clear_ci_status_reported(repo: &Repository) -> anyhow::Result<bool> {
     // The PR-number width ratchet is part of the CI cache category — it is
     // derived from the same fetches and re-learns on the next one.
-    let cleared = CachedCiStatus::clear_all(repo)? + MaxPrNumber::clear(repo)?;
-    if cleared > 0 {
-        eprintln!(
-            "{}",
-            success_message(cformat!(
-                "Cleared <bold>{cleared}</> CI cache entr{}",
-                if cleared == 1 { "y" } else { "ies" }
-            ))
-        );
-        return Ok(true);
-    }
-    Ok(false)
+    Ok(report_cleared_count(
+        CachedCiStatus::clear_all(repo)? + MaxPrNumber::clear(repo)?,
+        "CI cache entry",
+        "CI cache entries",
+    ))
 }
 
 fn clear_summary_reported(repo: &Repository) -> anyhow::Result<bool> {
-    let cleared = CachedSummary::clear_all(repo)?;
-    if cleared > 0 {
-        eprintln!(
-            "{}",
-            success_message(cformat!(
-                "Cleared <bold>{cleared}</> summary cache entr{}",
-                if cleared == 1 { "y" } else { "ies" }
-            ))
-        );
-        return Ok(true);
-    }
-    Ok(false)
+    Ok(report_cleared_count(
+        CachedSummary::clear_all(repo)?,
+        "summary cache entry",
+        "summary cache entries",
+    ))
 }
 
 /// Clear all SHA-keyed git command caches: parsed results (merge-tree,
@@ -1129,78 +1123,43 @@ fn clear_summary_reported(repo: &Repository) -> anyhow::Result<bool> {
 /// upstream-diff). Surfaced as one user-facing category — see the parity
 /// docstring at the top of this file.
 fn clear_git_commands_reported(repo: &Repository) -> anyhow::Result<bool> {
-    let cleared = sha_cache::clear_all(repo)? + preview_cache::clear_all(repo)?;
-    if cleared > 0 {
-        eprintln!(
-            "{}",
-            success_message(cformat!(
-                "Cleared <bold>{cleared}</> git commands cache entr{}",
-                if cleared == 1 { "y" } else { "ies" }
-            ))
-        );
-        return Ok(true);
-    }
-    Ok(false)
+    Ok(report_cleared_count(
+        sha_cache::clear_all(repo)? + preview_cache::clear_all(repo)?,
+        "git commands cache entry",
+        "git commands cache entries",
+    ))
 }
 
 fn clear_vars_reported(repo: &Repository) -> anyhow::Result<bool> {
-    let cleared = clear_all_vars(repo)?;
-    if cleared > 0 {
-        eprintln!(
-            "{}",
-            success_message(cformat!(
-                "Cleared <bold>{cleared}</> variable{}",
-                if cleared == 1 { "" } else { "s" }
-            ))
-        );
-        return Ok(true);
-    }
-    Ok(false)
+    Ok(report_cleared_count(
+        clear_all_vars(repo)?,
+        "variable",
+        "variables",
+    ))
 }
 
 fn clear_logs_reported(repo: &Repository) -> anyhow::Result<bool> {
-    let cleared = clear_logs(repo)?;
-    if cleared > 0 {
-        eprintln!(
-            "{}",
-            success_message(cformat!(
-                "Cleared <bold>{cleared}</> log file{}",
-                if cleared == 1 { "" } else { "s" }
-            ))
-        );
-        return Ok(true);
-    }
-    Ok(false)
+    Ok(report_cleared_count(
+        clear_logs(repo)?,
+        "log file",
+        "log files",
+    ))
 }
 
 fn clear_hints_reported(repo: &Repository) -> anyhow::Result<bool> {
-    let cleared = repo.clear_all_hints()?;
-    if cleared > 0 {
-        eprintln!(
-            "{}",
-            success_message(cformat!(
-                "Cleared <bold>{cleared}</> hint{}",
-                if cleared == 1 { "" } else { "s" }
-            ))
-        );
-        return Ok(true);
-    }
-    Ok(false)
+    Ok(report_cleared_count(
+        repo.clear_all_hints()?,
+        "hint",
+        "hints",
+    ))
 }
 
 fn clear_trash_reported(repo: &Repository) -> anyhow::Result<bool> {
-    let cleared = clear_trash(repo)?;
-    if cleared > 0 {
-        eprintln!(
-            "{}",
-            success_message(cformat!(
-                "Cleared <bold>{cleared}</> trash entr{}",
-                if cleared == 1 { "y" } else { "ies" }
-            ))
-        );
-        return Ok(true);
-    }
-    Ok(false)
+    Ok(report_cleared_count(
+        clear_trash(repo)?,
+        "trash entry",
+        "trash entries",
+    ))
 }
 
 // ==================== State Show Commands ====================
@@ -1300,7 +1259,7 @@ fn handle_state_show_json(repo: &Repository) -> anyhow::Result<()> {
         "trash": trash,
     });
 
-    println!("{}", serde_json::to_string_pretty(&output)?);
+    print_json(&output)?;
     Ok(())
 }
 
@@ -1479,7 +1438,7 @@ fn handle_cache_get_json(repo: &Repository) -> anyhow::Result<()> {
         "hints": repo.list_shown_hints(),
     });
 
-    println!("{}", serde_json::to_string_pretty(&output)?);
+    print_json(&output)?;
     Ok(())
 }
 
@@ -1503,6 +1462,13 @@ fn render_ci_status_section(out: &mut String, repo: &Repository) -> anyhow::Resu
     } else if entries.is_empty() {
         writeln!(out, "{}", format_with_gutter("(no entries)", None))?;
     } else {
+        // The Head column is here to be eyeballed against the branch's current
+        // head, so it abbreviates to the width git uses — `core.abbrev`, the
+        // same width `wt list`'s Commit cell and the statusline print. One
+        // probe covers every row: `short_sha` per entry would be a `git
+        // rev-parse` fork apiece, and a repo with a cache entry per branch
+        // turned this dump from 26 ms into 267 ms at 50 entries.
+        let abbrev = repo.abbrev_len();
         let rows: Vec<Vec<String>> = entries
             .iter()
             .map(|cached| {
@@ -1514,7 +1480,7 @@ fn render_ci_status_section(out: &mut String, repo: &Repository) -> anyhow::Resu
                     None => "none".to_string(),
                 };
                 let age = format_relative_time_short(cached.checked_at as i64);
-                let head: String = cached.head.chars().take(8).collect();
+                let head: String = cached.head.chars().take(abbrev).collect();
                 vec![cached.branch.clone(), status, age, head]
             })
             .collect();
@@ -1638,7 +1604,7 @@ pub fn handle_vars_get(key: &str, branch: Option<String>) -> anyhow::Result<()> 
     validate_vars_key(key)?;
     let repo = Repository::current()?;
     let branch_name = match branch {
-        Some(b) => b,
+        Some(b) => repo.require_selected_branch(&b, "get variable")?,
         None => repo.require_current_branch("get variable for current branch")?,
     };
 
@@ -1654,7 +1620,7 @@ pub fn handle_vars_set(key: &str, value: &str, branch: Option<String>) -> anyhow
     validate_vars_key(key)?;
     let repo = Repository::current()?;
     let branch_name = match branch {
-        Some(b) => b,
+        Some(b) => repo.require_selected_branch(&b, "set variable")?,
         None => repo.require_current_branch("set variable for current branch")?,
     };
 
@@ -1672,7 +1638,7 @@ pub fn handle_vars_set(key: &str, value: &str, branch: Option<String>) -> anyhow
 pub fn handle_vars_list(branch: Option<String>, format: SwitchFormat) -> anyhow::Result<()> {
     let repo = Repository::current()?;
     let branch_name = match branch {
-        Some(b) => b,
+        Some(b) => repo.require_selected_branch(&b, "list variables")?,
         None => repo.require_current_branch("list variables for current branch")?,
     };
 
@@ -1683,7 +1649,7 @@ pub fn handle_vars_list(branch: Option<String>, format: SwitchFormat) -> anyhow:
             .into_iter()
             .map(|(k, v)| (k, serde_json::Value::String(v)))
             .collect();
-        println!("{}", serde_json::to_string_pretty(&obj)?);
+        print_json(&obj)?;
     } else if entries.is_empty() {
         eprintln!(
             "{}",
@@ -1705,53 +1671,54 @@ pub fn handle_vars_clear(
 ) -> anyhow::Result<()> {
     let repo = Repository::current()?;
     let branch_name = match branch {
-        Some(b) => b,
+        Some(b) => repo.require_selected_branch(&b, "clear variable")?,
         None => repo.require_current_branch("clear variable for current branch")?,
     };
 
-    if !all && key.is_none() {
-        anyhow::bail!("Specify a key to clear, or use --all to clear all keys");
-    }
-
-    if all {
-        let entries: Vec<_> = repo.vars_entries(&branch_name).into_iter().collect();
-        if entries.is_empty() {
-            eprintln!(
-                "{}",
-                info_message(cformat!("No variables for <bold>{branch_name}</>"))
-            );
-        } else {
-            let count = entries.len();
-            for (key, _) in entries {
-                let config_key = format!("worktrunk.state.{branch_name}.vars.{key}");
-                repo.unset_config(&config_key)?;
-            }
-            eprintln!(
-                "{}",
-                success_message(cformat!(
-                    "Cleared <bold>{count}</> variable{} for <bold>{branch_name}</>",
-                    if count == 1 { "" } else { "s" }
-                ))
-            );
+    match (all, key) {
+        (false, None) => {
+            anyhow::bail!("Specify a key to clear, or use --all to clear all keys");
         }
-    } else {
-        let key = key.expect("key required when --all not set");
-        validate_vars_key(key)?;
-        let config_key = format!("worktrunk.state.{branch_name}.vars.{key}");
-        if repo.unset_config(&config_key)? {
-            eprintln!(
-                "{}",
-                success_message(cformat!(
-                    "Cleared <bold>{key}</> for <bold>{branch_name}</>"
-                ))
-            );
-        } else {
-            eprintln!(
-                "{}",
-                info_message(cformat!(
-                    "No variable <bold>{key}</> for <bold>{branch_name}</>"
-                ))
-            );
+        (true, _) => {
+            let entries: Vec<_> = repo.vars_entries(&branch_name).into_iter().collect();
+            if entries.is_empty() {
+                eprintln!(
+                    "{}",
+                    info_message(cformat!("No variables for <bold>{branch_name}</>"))
+                );
+            } else {
+                let count = entries.len();
+                for (key, _) in entries {
+                    let config_key = format!("worktrunk.state.{branch_name}.vars.{key}");
+                    repo.unset_config(&config_key)?;
+                }
+                eprintln!(
+                    "{}",
+                    success_message(cformat!(
+                        "Cleared <bold>{count}</> variable{} for <bold>{branch_name}</>",
+                        if count == 1 { "" } else { "s" }
+                    ))
+                );
+            }
+        }
+        (false, Some(key)) => {
+            validate_vars_key(key)?;
+            let config_key = format!("worktrunk.state.{branch_name}.vars.{key}");
+            if repo.unset_config(&config_key)? {
+                eprintln!(
+                    "{}",
+                    success_message(cformat!(
+                        "Cleared <bold>{key}</> for <bold>{branch_name}</>"
+                    ))
+                );
+            } else {
+                eprintln!(
+                    "{}",
+                    info_message(cformat!(
+                        "No variable <bold>{key}</> for <bold>{branch_name}</>"
+                    ))
+                );
+            }
         }
     }
     Ok(())
@@ -1765,7 +1732,11 @@ pub fn handle_vars_clear(
 /// `unset_config` call propagate errors so user-initiated clears never lie
 /// about success.
 fn clear_all_markers(repo: &Repository) -> anyhow::Result<usize> {
-    let output = repo.get_config_regexp(r"^worktrunk\.state\..+\.marker$")?;
+    clear_matching_config(repo, r"^worktrunk\.state\..+\.marker$")
+}
+
+fn clear_matching_config(repo: &Repository, pattern: &str) -> anyhow::Result<usize> {
+    let output = repo.get_config_regexp(pattern)?;
     let mut cleared = 0;
     for line in output.lines() {
         if let Some(config_key) = line.split_whitespace().next() {
@@ -1782,15 +1753,7 @@ fn clear_all_markers(repo: &Repository) -> anyhow::Result<usize> {
 /// config read failure surfaces as an error — the display-path helper
 /// absorbs errors as empty, which would silently report "cleared 0" here.
 fn clear_all_vars(repo: &Repository) -> anyhow::Result<usize> {
-    let output = repo.get_config_regexp(r"^worktrunk\.state\..+\.vars\.")?;
-    let mut cleared = 0;
-    for line in output.lines() {
-        if let Some(config_key) = line.split_whitespace().next() {
-            repo.unset_config(config_key)?;
-            cleared += 1;
-        }
-    }
-    Ok(cleared)
+    clear_matching_config(repo, r"^worktrunk\.state\..+\.vars\.")
 }
 
 // ==================== Marker Helpers ====================

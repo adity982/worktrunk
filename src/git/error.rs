@@ -36,12 +36,12 @@ use crate::styling::{
 
 /// Platform-specific reference type (PR vs MR).
 ///
-/// Used to unify error handling for GitHub PRs and GitLab MRs.
+/// Used to unify error handling across supported forges.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefType {
-    /// GitHub Pull Request
+    /// Pull request (GitHub, Gitea, or Azure DevOps)
     Pr,
-    /// GitLab Merge Request
+    /// GitLab merge request
     Mr,
 }
 
@@ -84,25 +84,6 @@ impl RefType {
     pub fn display(self, number: u32) -> String {
         format!("{} {}{}", self.name(), self.symbol(), number)
     }
-}
-
-/// Common display fields for PR/MR context.
-///
-/// Implemented by both `PrInfo` and `MrInfo` to enable unified formatting.
-pub trait RefContext {
-    fn ref_type(&self) -> RefType;
-    fn number(&self) -> u32;
-    fn title(&self) -> &str;
-    fn author(&self) -> &str;
-    fn state(&self) -> &str;
-    fn draft(&self) -> bool;
-    fn url(&self) -> &str;
-
-    /// The source branch reference for display.
-    ///
-    /// For same-repo PRs/MRs: just the branch name (e.g., `feature-auth`)
-    /// For fork PRs/MRs: `owner:branch` format (e.g., `contributor:feature-fix`)
-    fn source_ref(&self) -> String;
 }
 
 /// Multi-line styled rendering for terminal display.
@@ -391,7 +372,7 @@ impl SwitchSuggestionCtx {
 ///
 /// // A typed error converts into a type-erased one (in real code, into `anyhow::Error`).
 /// let err: Box<dyn std::error::Error> =
-///     GitError::DetachedHead { action: Some("merge".into()) }.into();
+///     GitError::DetachedHead { action: Some("merge".into()), worktree: None }.into();
 ///
 /// // Recover the typed error to branch on the variant.
 /// if let Some(GitError::BranchAlreadyExists { branch }) = err.downcast_ref::<GitError>() {
@@ -401,19 +382,34 @@ impl SwitchSuggestionCtx {
 #[derive(Debug, Clone)]
 pub enum GitError {
     // Git state errors
+    /// A worktree is not on a branch, so a command needing one refuses.
+    ///
+    /// `worktree` names the detached worktree when that isn't the one the
+    /// command ran in, and changes only the hint. `git switch` acts on the tree
+    /// it runs in, so an unqualified suggestion points at the tree the user is
+    /// standing in — the wrong one when the detached worktree is a target they
+    /// named (`wt merge ../other`). [`GitError::OperationInProgress`] carries
+    /// `branch` for the same reason.
     DetachedHead {
         action: Option<String>,
+        worktree: Option<PathBuf>,
     },
-    /// The worktree is partway through a git operation, so a command that
+    /// A worktree is partway through a git operation, so a command that
     /// rewrites or moves commits (`wt merge`, `wt step rebase`,
     /// `wt step squash`, `wt step push`) refuses to start.
     ///
     /// Carries no operation and offers no remedy: `git status` names which
     /// operation is open and how to finish it, so restating either here only
-    /// adds a line that can drift from what git accepts.
+    /// adds a line that can drift from what git accepts. `branch` is what
+    /// tells the user *where* to run it — the push's target worktree is not
+    /// the one they are standing in, and an unqualified refusal there sends
+    /// them to inspect the wrong tree.
     OperationInProgress {
         /// The action the user asked for ("merge", "rebase").
         action: String,
+        /// Branch whose worktree holds the open operation, when that isn't the
+        /// worktree the command ran in.
+        branch: Option<String>,
     },
     /// The index still holds unresolved conflicts, so a command that stages on
     /// the user's behalf (`wt step commit`, `wt step squash`) refuses to run.
@@ -592,6 +588,57 @@ pub enum GitError {
     WorktreeNotFound {
         branch: String,
     },
+    /// A worktree selector matched neither a branch nor a worktree path.
+    ///
+    /// Distinct from [`GitError::WorktreeNotFound`], which means the branch
+    /// exists and simply has no checkout — there, suggesting `wt switch` to
+    /// create one is right. Here wt cannot tell whether the user meant a branch
+    /// or a path, and `wt switch <a-path-that-matched-nothing>` would only fail
+    /// again, so the message asks for neither.
+    WorktreeSelectorNotFound {
+        selector: String,
+    },
+    /// A directory that holds no worktree, named by a selector no branch could
+    /// answer to.
+    ///
+    /// The third member of the family: [`GitError::WorktreeNotFound`] is a
+    /// branch without a checkout, [`GitError::WorktreeSelectorNotFound`] a
+    /// token that could have been either, and this one a directory `wt list`
+    /// will never show and only the user can delete. Built solely by
+    /// [`Repository::path_selector_directory`](crate::git::Repository::path_selector_directory),
+    /// which owns every test that has to pass before this claim is safe.
+    WorktreeNotFoundAtPath {
+        path: PathBuf,
+    },
+    /// A registered worktree's path that something else now occupies: another
+    /// repository, or a sibling worktree of this one moved onto the path.
+    ///
+    /// The registration still resolves and the directory is still there, so
+    /// every check short of asking what the directory points at passes —
+    /// including the dirty-worktree gate, which reads the occupant's `git
+    /// status` and reports it as this worktree's. Removal is the operation that
+    /// has to care: the directory holds work this registration cannot account
+    /// for, and possibly the only copy of its objects.
+    ///
+    /// git refuses the same removal (`validation failed … does not point back
+    /// to '.git/worktrees/<id>'`), `--force` included. Worktrunk's fast path
+    /// renames the directory itself rather than asking git to, so it has to
+    /// make this check for itself — see `ensure_holds_this_worktree`.
+    WorktreePathNotOurs {
+        path: PathBuf,
+        /// Where the occupant's own registration records it, when this
+        /// repository has a registration to ask: the occupant is one of its
+        /// worktrees, sitting at the wrong path.
+        ///
+        /// `None` covers both ways that question goes unanswered — an occupant
+        /// answering to a different repository, and a registration of ours whose
+        /// `gitdir` file has gone missing. Neither names a path to move the
+        /// directory to, so both take the hint that doesn't name one.
+        ///
+        /// The two remedies differ, which is why the case is carried rather
+        /// than inferred at display time — see the hint below.
+        occupant_registered_at: Option<PathBuf>,
+    },
     /// --create flag used with pr:/mr: syntax (conflict - branch already exists)
     RefCreateConflict {
         ref_type: RefType,
@@ -640,6 +687,15 @@ pub enum GitError {
 
 impl std::error::Error for GitError {}
 
+/// `"1 path with unresolved conflicts"` — the shared tail of every message
+/// about an unmerged index. [`GitError::UnmergedPaths`] refuses outright;
+/// `wt step relocate` warns and skips instead, because a conflict blocks only
+/// one of the many worktrees it walks. The phrase is shared, not the error type.
+pub fn format_unresolved_conflicts(count: usize) -> String {
+    let paths = if count == 1 { "path" } else { "paths" };
+    format!("{count} {paths} with unresolved conflicts")
+}
+
 impl GitError {
     /// Styled title for this variant (first line, with inline `<bold>`
     /// highlights on entity names like branch and path).
@@ -652,19 +708,30 @@ impl GitError {
         match self {
             GitError::WithSwitchSuggestion { source, .. } => source.title(),
 
-            GitError::DetachedHead { action } => match action {
+            GitError::DetachedHead { action, .. } => match action {
                 Some(action) => cformat!("Cannot {action}: not on a branch (detached HEAD)"),
                 None => "Not on a branch (detached HEAD)".to_string(),
             },
 
-            GitError::OperationInProgress { action } => {
+            GitError::OperationInProgress {
+                action,
+                branch: None,
+            } => {
                 cformat!("Cannot {action}: a git operation is already in progress")
             }
 
+            GitError::OperationInProgress {
+                action,
+                branch: Some(branch),
+            } => cformat!(
+                "Cannot {action}: a git operation is already in progress in the <bold>{branch}</> worktree"
+            ),
+
             GitError::UnmergedPaths { action, files } => {
-                let count = files.len();
-                let paths = if count == 1 { "path" } else { "paths" };
-                cformat!("Cannot {action}: {count} {paths} with unresolved conflicts")
+                format!(
+                    "Cannot {action}: {}",
+                    format_unresolved_conflicts(files.len())
+                )
             }
 
             GitError::UncommittedChanges { action, branch, .. } => match (action, branch) {
@@ -829,6 +896,22 @@ impl GitError {
                 cformat!("Branch <bold>{branch}</> has no worktree")
             }
 
+            GitError::WorktreeSelectorNotFound { selector } => {
+                cformat!("No branch or worktree named <bold>{selector}</>")
+            }
+
+            GitError::WorktreeNotFoundAtPath { path } => {
+                let path_display = format_path_for_display(path);
+                cformat!("No worktree @ <bold>{path_display}</>")
+            }
+
+            GitError::WorktreePathNotOurs { path, .. } => {
+                let path_display = format_path_for_display(path);
+                cformat!(
+                    "Directory @ <bold>{path_display}</> does not hold the worktree registered there"
+                )
+            }
+
             GitError::RefCreateConflict {
                 ref_type,
                 number,
@@ -886,14 +969,20 @@ impl GitError {
                 source.write_render_with_ctx(f, Some(ctx))
             }
 
-            GitError::DetachedHead { .. } => {
+            GitError::DetachedHead { worktree, .. } => {
                 let title = self.title();
+                let switch_cmd = match worktree {
+                    Some(path) => {
+                        format!("git -C {} switch <branch>", format_path_for_display(path))
+                    }
+                    None => "git switch <branch>".to_string(),
+                };
                 write!(
                     f,
                     "{}\n{}",
                     error_message(&title),
                     hint_message(cformat!(
-                        "To switch to a branch, run <underline>git switch <<branch>></>"
+                        "To switch to a branch, run <underline>{switch_cmd}</>"
                     ))
                 )
             }
@@ -1146,12 +1235,13 @@ impl GitError {
                     )?;
                 }
                 // Fragile by necessity: matches git's English, which is
-                // localized and could be reworded. `remaining_entries` is not a
-                // substitute — a permission-denied failure also leaves entries
-                // behind, and this hint is only right for ENOTEMPTY. The
-                // structured form (`io::ErrorKind::DirectoryNotEmpty`) is lost
-                // upstream, where the cause is flattened to a rendered string
-                // before it reaches this type. A miss costs one hint.
+                // localized and could be reworded. The text is `git worktree
+                // remove`'s own stderr — the failure never passes through a
+                // Rust `io::Error`, and git offers no porcelain or exit code
+                // that separates ENOTEMPTY from the rest. `remaining_entries`
+                // is not a substitute either: a permission-denied failure also
+                // leaves entries behind, and this hint is only right for
+                // ENOTEMPTY. A miss costs one hint.
                 if error.contains("not empty") {
                     write!(
                         f,
@@ -1295,7 +1385,11 @@ impl GitError {
 
             GitError::NotInteractive => {
                 let title = self.title();
-                let approvals_cmd = suggest_command("config", &["approvals", "add"], &[]);
+                // The pre-approval route is itself unattended, so it carries
+                // `--yes` — a hint reached in CI must name a command that runs
+                // there. Raised from `wt config approvals add` itself, that
+                // suggestion is the exact fix: append the flag.
+                let approvals_cmd = suggest_command("config approvals add", &[], &["--yes"]);
                 write!(
                     f,
                     "{}\n{}",
@@ -1364,6 +1458,62 @@ impl GitError {
                         "To create a worktree, run <underline>{switch_cmd}</>"
                     ))
                 )
+            }
+
+            GitError::WorktreeSelectorNotFound { .. } => {
+                let title = self.title();
+                write!(
+                    f,
+                    "{}\n{}",
+                    error_message(&title),
+                    hint_message(cformat!(
+                        "To see branches and worktree paths, run <underline>wt list --branches</>"
+                    ))
+                )
+            }
+
+            GitError::WorktreeNotFoundAtPath { .. } => {
+                let title = self.title();
+                let list_cmd = suggest_command("list", &[], &[]);
+                write!(
+                    f,
+                    "{}\n{}",
+                    error_message(&title),
+                    hint_message(cformat!(
+                        "The directory exists but is not a worktree; to list worktrees, run <underline>{list_cmd}</>"
+                    ))
+                )
+            }
+
+            GitError::WorktreePathNotOurs {
+                occupant_registered_at,
+                ..
+            } => {
+                let title = self.title();
+                // Both remedies end in `git worktree prune`, and neither can
+                // start with it: prune keeps a registration whose directory
+                // resolves, which this one does — the occupant's own `.git`
+                // answers for it. Moving the directory is what makes prune able
+                // to act. Where it should move to is what the two cases
+                // disagree on.
+                let hint = match occupant_registered_at {
+                    // A worktree of this repository, whose own registration
+                    // still records the directory it left. Naming that path is
+                    // what keeps prune to the one stale entry: from anywhere
+                    // else both registrations are prunable, and clearing them
+                    // both leaves this checkout pointing at a registration that
+                    // no longer exists.
+                    Some(registered_at) => {
+                        let registered_display = format_path_for_display(registered_at);
+                        cformat!(
+                            "Removing it could destroy the worktree registered @ <underline>{registered_display}</>; move the directory back there, then run <underline>git worktree prune</>"
+                        )
+                    }
+                    None => cformat!(
+                        "Removing it could destroy unrelated data; move the directory aside, then run <underline>git worktree prune</>"
+                    ),
+                };
+                write!(f, "{}\n{}", error_message(&title), hint_message(hint))
             }
 
             GitError::RefCreateConflict {
@@ -1886,7 +2036,11 @@ mod tests {
             Some(5)
         );
         assert_eq!(
-            anyhow::Error::from(GitError::DetachedHead { action: None }).exit_code(),
+            anyhow::Error::from(GitError::DetachedHead {
+                action: None,
+                worktree: None
+            })
+            .exit_code(),
             None
         );
 
@@ -2014,7 +2168,11 @@ mod tests {
         .into();
         assert!(!render_anyhow(&add_hook_skip_hint(err)).contains("--no-hooks"));
 
-        let err: anyhow::Error = GitError::DetachedHead { action: None }.into();
+        let err: anyhow::Error = GitError::DetachedHead {
+            action: None,
+            worktree: None,
+        }
+        .into();
         assert!(!render_anyhow(&add_hook_skip_hint(err)).contains("--no-hooks"));
 
         let err: anyhow::Error = GitError::Other {
@@ -2051,11 +2209,11 @@ mod tests {
             @"Rebase onto main incomplete"
         );
         assert_snapshot!(
-            GitError::DetachedHead { action: Some("merge".into()) }.to_string(),
+            GitError::DetachedHead { action: Some("merge".into()), worktree: None }.to_string(),
             @"Cannot merge: not on a branch (detached HEAD)"
         );
         assert_snapshot!(
-            GitError::DetachedHead { action: None }.to_string(),
+            GitError::DetachedHead { action: None, worktree: None }.to_string(),
             @"Not on a branch (detached HEAD)"
         );
 
@@ -2560,6 +2718,7 @@ mod tests {
         // Non-switch-suggestion errors should be completely unaffected by the wrapper
         let inner = GitError::DetachedHead {
             action: Some("merge".into()),
+            worktree: None,
         };
         let wrapped = GitError::WithSwitchSuggestion {
             source: Box::new(inner.clone()),

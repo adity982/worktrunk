@@ -41,32 +41,20 @@ If codecov fails **locally**, investigate with `task coverage` and
 
 ### Investigating codecov failures in CI
 
-`task` and `cargo-llvm-cov` are not installed in the `claude-setup` action.
+`task` and `cargo-llvm-cov` are not installed in the `tend-setup` action.
 Don't try to `cargo install` them in the sandbox — past attempts at
 source-compiling installs cascaded into bash-tool interrupts that blocked
-even `pwd` and `echo`. (Pre-built single-script installers like Determinate
-Nix's are fine — see **Weekly Maintenance: MSRV & Toolchain** for the one we
-use. The block is specifically about long-running cargo compiles.) Instead,
-query Codecov directly:
+even `pwd` and `echo`. Instead, query Codecov directly, following
+`tests/CLAUDE.md` → **Coverage Investigation** for the endpoints and their
+traps.
+
+If the Codecov API markers aren't enough, download the `code-coverage-report`
+artifact from the PR head's `coverage` workflow run — it contains a
+`cobertura.xml` with per-line hit counts:
 
 ```bash
 REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
-curl -sL "https://api.codecov.io/api/v2/gh/${REPO%/*}/repos/${REPO#*/}/compare/?pullid=<N>" > /tmp/codecov.json
-
-# Patch-level summary per file:
-jq '.files[] | {name: .name.head, patch: .totals.patch}' /tmp/codecov.json
-
-# Uncovered added lines in a specific changed file
-# (coverage.head is a LineType enum: 0=hit, 1=miss, 2=partial — filter on 1=miss):
-jq '.files[] | select(.name.head == "<path>") | .lines[] | select(.is_diff and .added and .coverage.head == 1) | {line: .number.head, code: .value}' /tmp/codecov.json
-```
-
-If the Codecov API markers aren't enough, download the `code-coverage-report`
-artifact from the PR head's `ci` workflow run — it contains a `cobertura.xml`
-with per-line hit counts:
-
-```bash
-# Find the ci run on the PR head SHA:
+# Find the coverage run on the PR head SHA:
 CI_RUN=$(gh api "repos/$REPO/commits/<sha>/check-runs" --jq '.check_runs[] | select(.name == "code-coverage") | .details_url | capture("runs/(?<id>[0-9]+)") | .id')
 # List artifacts, then download the coverage one:
 gh api "repos/$REPO/actions/runs/$CI_RUN/artifacts" --jq '.artifacts[] | {name, id}'
@@ -195,6 +183,18 @@ When an issue is clearly a duplicate, close it after commenting. Use
 `gh issue close <number>` and tell the reporter: if they believe this was
 closed in error, they can let us know and we'll reopen it.
 
+### Check `--config-set` before calling a setting unpinnable
+
+`wt --config-set '<toml>'` overrides any user config key for one invocation,
+above both config files and `WORKTRUNK_SECTION__KEY` env vars ([inline config
+overrides](https://worktrunk.dev/config/#inline-config-overrides-config-set)).
+The resolver just reads `repo.config().<key>` and shows no sign of that layer,
+so before writing "there's no way to do X per invocation", ask whether X is a
+config key: the ask is usually already met, and the reply is a `--config-set`
+recipe plus a docs fix where the docs don't connect the flag to the setting.
+Pinning is all that covers — weigh the request's residual asks on their own
+merits.
+
 ### Suggesting Aliases for Niche Feature Requests
 
 worktrunk deliberately limits flag and config growth, so a `wt` alias is the
@@ -266,26 +266,27 @@ Files to update:
 | `Cargo.toml` | `rust-version` | `"1.93"` |
 | `tests/helpers/wt-perf/Cargo.toml` | `rust-version` | `"1.93"` |
 | `rust-toolchain.toml` | `channel` | `"1.93.0"` |
+| `.github/workflows/nightly.yaml` | `rustup override set nightly-<date>`, twice (`minimal-versions`, `check-unused-dependencies`) | a nightly from the last few weeks |
+
+Bump the nightly pins only when the pinned date is more than three months old.
+Cargo refuses a workspace whose `rust-version` exceeds the toolchain, so an
+MSRV bump past a stale pin fails both jobs before they check anything.
 
 `flake.nix` reads the channel from `rust-toolchain.toml`, so no separate bump
 is needed. After updating the toolchain, refresh `flake.lock` so the locked
-`rust-overlay` revision knows about the new version. Nix isn't installed in
-the tend sandbox by default — install it with the Determinate Systems
-installer (single script, daemon-mode, no prompts), then update:
+`rust-overlay` revision knows about the new version. `tend-setup` installs Nix
+with flakes enabled:
 
 ```bash
-curl -fsSL https://install.determinate.systems/nix -o /tmp/nix-installer.sh
-sh /tmp/nix-installer.sh install --no-confirm --determinate
-. /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
-nix flake update --extra-experimental-features 'nix-command flakes'
+# Name the input: a bare `nix flake update` also relocks nixpkgs, an
+# unrelated bump in a toolchain-scoped PR.
+nix flake update rust-overlay
+# Check the bumped channel still evaluates
+nix eval .#devShells.x86_64-linux.default.name
 ```
 
-Verify the new lock evaluates with the channel bump before committing:
-
-```bash
-nix eval --extra-experimental-features 'nix-command flakes' \
-  .#devShells.x86_64-linux.default.name
-```
+If `nix` isn't on the PATH, `tend-setup` regressed. Say so in the PR and leave
+`flake.lock` alone rather than hand-computing an entry.
 
 Commit `flake.lock` alongside the other toolchain changes. After bumping, run
 the full test suite (`cargo run -- hook pre-merge --yes`) and verify
@@ -295,33 +296,56 @@ the full test suite (`cargo run -- hook pre-merge --yes`) and verify
 
 Pinned third-party versions in CI are invisible to Dependabot — it follows `Cargo.toml` deps and `uses: foo@vN` action refs, not inline `version:` strings. They drift unless this step bumps them.
 
-For each weekly run, check upstream and bump:
+Each weekly run checks every pin below against upstream and bumps whatever has drifted. A bump that can turn a whole CI leg red — an OS image, a major version, a tool whose version moves snapshots — goes on its own branch and PR, so a red matrix decides only that bump instead of holding back the week's safe ones. The weekly runner is Linux, so that PR's own checks are the only place a macOS or Windows change gets tested; open it and report what they said.
 
-- **`baptiste0928/cargo-install@v3` blocks** in `.github/workflows/ci.yaml`, `.github/workflows/nightly.yaml`, and `.github/actions/{test,claude}-setup/action.yaml` — every `version: "=X.Y.Z"` against `cargo info <crate>`. Today: `cargo-insta`, `cargo-nextest`, `cargo-llvm-cov`, `cargo-msrv`, `cargo-udeps`, `lychee`, `worktrunk`. The `cargo-affected` install has no version pin (follows default branch) — leave it alone. Verify each crate's `rust-version` against the pinned toolchain and note compatibility in the PR body (see PR #1657 for the format).
-- **`hustcer/setup-nu@v3`** `version:` input — latest from `gh api repos/nushell/nushell/releases/latest --jq '.tag_name'`. Four call sites: `ci.yaml` (`code-coverage`), `nightly.yaml` (`feature-powerset`), `benchmarks.yaml` (`benchmarks`), and `actions/test-setup/action.yaml`.
-- **`taiki-e/install-action@v2.x`** `tool: zola@<ver>` in the `check-docs` job — latest from `gh api repos/getzola/zola/releases/latest --jq '.tag_name'`.
-- **Runner images** — `ubuntu-24.04`, `macos-15`, `windows-2022`. Keep `windows-2022` pinned (actions/runner-images#12677 — windows-2025 lacks the D: drive).
+- **`baptiste0928/cargo-install@v3` blocks** in `.github/workflows/{affected,ci,coverage,nightly}.yaml` and `.github/actions/{test,tend}-setup/action.yaml` — every `version: "=X.Y.Z"` against `cargo info <crate>`. Today: `cargo-affected`, `cargo-insta`, `cargo-nextest`, `cargo-llvm-cov`, `cargo-msrv`, `cargo-udeps`, `lychee`, `worktrunk`. `cargo-affected` is pinned twice in `affected.yaml`; move both together. Verify each crate's `rust-version` against the pinned toolchain and note compatibility in the PR body (see PR #1657 for the format).
+- **`hustcer/setup-nu@v3`** `version:` input — latest from `gh api repos/nushell/nushell/releases/latest --jq '.tag_name'`. Five call sites: `coverage.yaml` (`code-coverage`), `nightly.yaml` (`feature-powerset`), `benchmarks.yaml` (`benchmarks`), and `.github/actions/{test,tend}-setup/action.yaml` — `tend-setup`'s copy is what puts `nu` in the agent's sandbox, so it moves with the others.
+- **Codex Cloud tools** — `.codex/cloud.sh` pins pre-commit, cargo-insta, cargo-nextest, Nushell, and PowerShell; `setup-web` pins Nushell and PowerShell. Keep cargo-insta, cargo-nextest, and Nushell level with `.github/actions/test-setup/action.yaml`, which pins the same three — the gate runs `--all-features`, so Nushell's version moves PTY snapshots. Nothing under `.github/` pins PowerShell (CI runs whatever the runner image ships), so bump that one on its own.
+- **Docs site packages** in `docs/package.json` are covered by Dependabot's `/docs` npm entry. Do not duplicate those bumps in this manual pin pass. The one thing that pass does own is the `ignore` entry for `typescript` majors in `.github/dependabot.yaml`: it suppresses the proposal Dependabot would otherwise make, so nothing else can surface it. Check `npm view @astrojs/check peerDependencies.typescript` against the current `typescript` major and delete the entry once the range covers it — the rule is version-agnostic, so left in place it blocks a major `@astrojs/check` fully supports just as silently as the TypeScript 7 it was added for (#3877).
+- **Runner images** — every `runs-on:` label and matrix `os:`/`runner:` value in the workflows. A pin equals what its `-latest` label currently resolves to, per the availability table in `actions/runner-images`:
+
+  ```bash
+  gh api repos/actions/runner-images/contents/README.md \
+    -H 'Accept: application/vnd.github.raw' | sed -n '/^| Image/,/^$/p'
+  ```
+
+  Bump any pin the table no longer lists against `-latest`, and update `ci.yaml`'s header comment, which records the reason for each image it names. GitHub keeps two GA images per OS and begins deprecating the older one as soon as a newer goes GA, so a pin that has fallen off `-latest` is already the next one due; the table's `deprecated` badge marks that deadline, not the moment to move, and a row badged `preview` is not a bump target.
+
+  A variant label — `-arm`, `-intel`, `-large` — has no `-latest` of its own; it follows its base image's row.
+
+  Where a pin is deliberately held back, that comment says what the repo needs from the older image. Re-check that need against the newer image each week — upstream announces image changes as issues, so `gh search issues --repo actions/runner-images "<the need> <newer image>"` surfaces a reversal. Reading the cited issue's state is not the test — an announcement closes when its change ships, in either direction.
+
+  The `tend-*.yaml` workflows also pin a runner, but tend's generator writes them and `uvx tend@latest init` overwrites a hand edit; file a tend issue for those.
 
 Discovery shortcut: a recent green CI run on `main` flags cargo-install drift directly via workflow annotations. `gh run view <run-id> --json jobs --jq '.jobs[].databaseId' | xargs -I{} gh api repos/<owner>/<repo>/check-runs/{}/annotations` returns one warning per outdated pin.
 
 ## Weekly Maintenance: Statusline Cache-Check
 
 Detect new in-process cache-miss duplicates introduced by recent changes by
-profiling a real `wt list statusline --claude-code` trace. The render runs on
-every Claude Code prompt redraw, so duplicate git subprocesses there compound
-into measurable fseventsd / IPC load.
+profiling a real `wt list statusline --format=claude-code` trace. The render
+runs on every Claude Code prompt redraw, so duplicate git subprocesses there
+compound into measurable fseventsd / IPC load.
 
 ```bash
-# Run from any worktree of this repo
-cat > /tmp/statusline-input.json <<'EOF'
-{"hook_event_name":"Status","workspace":{"current_dir":"REPLACE_WITH_CWD"},
- "model":{"display_name":"Opus"},"context_window":{"used_percentage":42.0}}
-EOF
-sed -i '' "s|REPLACE_WITH_CWD|$PWD|" /tmp/statusline-input.json
+# Run from any worktree of this repo. `jq -n` builds the stdin JSON so the
+# recipe is portable (the weekly job runs on ubuntu-24.04, whose GNU sed
+# rejects BSD's `sed -i ''`) and so a path with a quote can't corrupt it.
+jq -n --arg cwd "$PWD" '{
+  hook_event_name: "Status",
+  workspace: {current_dir: $cwd},
+  model: {display_name: "Opus"},
+  context_window: {used_percentage: 42.0}
+}' > /tmp/statusline-input.json
 
-cargo run --release -- -vv list statusline --claude-code \
+# Debug build on purpose. `tend-weekly` installs no `wt`, and its rust-cache
+# step is `save-if: false` under a key no workflow writes, so `--release`
+# means a cold optimized build of the whole dependency graph before the first
+# render. The duplicate `(command, context)` pairs this check reads are
+# profile-independent; only the timing columns, which this section doesn't
+# triage, would be worth a release build.
+cargo run -- -vv list statusline --format=claude-code \
   < /tmp/statusline-input.json > /dev/null
-cargo run --release -- config state logs profile --format=json | jq .cache
+cargo run -- config state logs profile --format=json | jq .cache
 ```
 
 The `.cache` report flags commands invoked more than once with the same context.
@@ -334,9 +358,6 @@ Triage each duplicate:
   `merge_base("main", "branch")` keying separately;
   `worktree_at(cwd)` vs `worktree_at(porcelain_path)` not canonicalizing.
 
-Baseline: ~29 git subprocesses per render on a clean tree; a jump above
-~32 warrants investigation.
-
 ## Weekly Maintenance: LLM Model Names in Docs
 
 Grep for current Claude and Codex pins across every tracked file:
@@ -347,7 +368,7 @@ git grep -niE "claude|codex"
 
 Check the latest IDs at <https://docs.anthropic.com/en/docs/about-claude/models> and <https://developers.openai.com/codex/models>. The recommended commit-message commands should use the most recent fastest model from each vendor (Haiku for Anthropic, the smallest current Codex variant for OpenAI).
 
-**On drift, open a PR — don't file an issue.** The source of truth is `after_long_help` in `src/cli/mod.rs`; edit it and let `cargo test --test integration test_docs_are_in_sync` regenerate the mirrors under `docs/content/` and `skills/worktrunk/reference/`. The "smallest current variant" call is a judgment — pick the one the vendor's models page currently positions as fastest/smallest, and explain the choice in the PR body. Verifying the new model name with an installed CLI (`codex -m <name>`, etc.) isn't possible in this CI sandbox; the PR is the right output anyway, and the maintainer tests on merge.
+**On drift, open a PR — don't file an issue.** The source of truth is `after_long_help` in `src/cli/mod.rs`; edit it and let `cargo test --test integration test_docs_are_in_sync` regenerate the mirrors under `docs/src/content/docs/` and `skills/worktrunk/reference/`. The "smallest current variant" call is a judgment — pick the one the vendor's models page currently positions as fastest/smallest, and explain the choice in the PR body. Verifying the new model name with an installed CLI (`codex -m <name>`, etc.) isn't possible in this CI sandbox; the PR is the right output anyway, and the maintainer tests on merge.
 
 ## Weekly Maintenance: Agent App Integration Surfaces
 

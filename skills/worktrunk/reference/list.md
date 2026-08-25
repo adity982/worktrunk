@@ -14,48 +14,48 @@ The table renders progressively: branch names, paths, and commit hashes appear i
 
 List all worktrees:
 
-```
+```console
 $ wt list
-  Branch       Status        HEAD±    main↕     main…±  Remote⇅  Commit    Age   Message
-@ feature-api  +   ↕⇡     +54   -5   ↑4  ↓1  +234  -24   ⇡3      6814f02a  30m   Add API tests
-^ main             ^⇅                                    ⇡1  ⇣1  41ee0834  4d    Merge fix-auth:…
-+ fix-auth         ↕|                ↑2  ↓1   +25  -11     |     b772e68b  5h    Add secure token…
-+ fix-typos        _|                                      |     41ee0834  4d    Merge fix-auth:…
+  Branch       Status        HEAD±    main↕     main…±  Remote⇅  Commit   Age   Message
+@ feature-api  +   ↕⇡     +54   -5   ↑4  ↓1  +234  -24   ⇡3      6814f02  30m   Add API tests
+^ main             ^⇅                                    ⇡1  ⇣1  41ee083  4d    Merge fix-auth: h…
++ fix-auth         ↕|                ↑2  ↓1   +25  -11     |     b772e68  5h    Add secure token…
++ fix-typos        _|                                      |     41ee083  4d    Merge fix-auth: h…
 
 ○ Showing 4 worktrees, 1 with changes, 2 ahead, 1 column hidden
 ```
 
 Include CI status and LLM summaries:
 
-```
+```console
 $ wt list --full
-  Branch       Status        HEAD±    main↕     main…±  Summary                                                Remote⇅  CI    Commit
-@ feature-api  +   ↕⇡     +54   -5   ↑4  ↓1  +234  -24  Refactor API to REST architecture with middleware       ⇡3      #412  6814f02a
-^ main             ^⇅                                                                                           ⇡1  ⇣1  #     41ee0834
-+ fix-auth         ↕|                ↑2  ↓1   +25  -11  Harden auth with constant-time token validation           |     #408  b772e68b
-+ fix-typos        _|                                                                                             |     #410  41ee0834
+  Branch       Status        HEAD±    main↕     main…±  Summary                                                 Remote⇅  CI    Commit
+@ feature-api  +   ↕⇡     +54   -5   ↑4  ↓1  +234  -24  Refactor API to REST architecture with middleware        ⇡3      #412  6814f02
+^ main             ^⇅                                                                                            ⇡1  ⇣1  #     41ee083
++ fix-auth         ↕|                ↑2  ↓1   +25  -11  Harden auth with constant-time token validation            |     #408  b772e68
++ fix-typos        _|                                                                                              |     #410  41ee083
 
 ○ Showing 4 worktrees, 1 with changes, 2 ahead, 3 columns hidden
 ```
 
 Include branches that don't have worktrees:
 
-```
+```console
 $ wt list --branches --full
-  Branch       Status        HEAD±    main↕     main…±  Summary                                                Remote⇅  CI    Commit
-@ feature-api  +   ↕⇡     +54   -5   ↑4  ↓1  +234  -24  Refactor API to REST architecture with middleware       ⇡3      #412  6814f02a
-^ main             ^⇅                                                                                           ⇡1  ⇣1  #     41ee0834
-+ fix-auth         ↕|                ↑2  ↓1   +25  -11  Harden auth with constant-time token validation           |     #408  b772e68b
-+ fix-typos        _|                                                                                             |     #410  41ee0834
-/ exp             /↕                 ↑2  ↓1  +137       Explore GraphQL schema and resolvers                                  96379229
-/ wip             /↕                 ↑1  ↓1   +33       Start API documentation                                               b40716dc
+  Branch       Status        HEAD±    main↕     main…±  Summary                                                 Remote⇅  CI    Commit
+@ feature-api  +   ↕⇡     +54   -5   ↑4  ↓1  +234  -24  Refactor API to REST architecture with middleware        ⇡3      #412  6814f02
+^ main             ^⇅                                                                                            ⇡1  ⇣1  #     41ee083
++ fix-auth         ↕|                ↑2  ↓1   +25  -11  Harden auth with constant-time token validation            |     #408  b772e68
++ fix-typos        _|                                                                                              |     #410  41ee083
+/ exp             /↕                 ↑2  ↓1  +137       Explore GraphQL schema and resolvers                                   9637922
+/ wip             /↕                 ↑1  ↓1   +33       Start API documentation                                                b40716d
 
 ○ Showing 4 worktrees, 2 branches, 1 with changes, 4 ahead, 3 columns hidden
 ```
 
 Output as JSON for scripting:
 
-```bash
+```console
 $ wt list --format=json
 ```
 
@@ -63,7 +63,7 @@ $ wt list --format=json
 
 | Column | Shows |
 |--------|-------|
-| Branch | Branch name |
+| Branch | Branch name; a detached worktree has none, so it shows its short hash in dim yellow |
 | Status | Compact symbols (see below) |
 | HEAD± | Uncommitted changes: +added -deleted lines |
 | main↕ | Commits ahead/behind default branch |
@@ -74,7 +74,7 @@ $ wt list --format=json
 | Path | Worktree directory |
 | URL | Dev server URL from project config; dimmed if port is not listening |
 | *(custom)* | User-defined [custom columns](#custom-columns) from `[list.custom-columns]` user config [experimental] |
-| Commit | Short hash (8 chars) |
+| Commit | Short hash, abbreviated per `core.abbrev` |
 | Age | Time since last commit |
 | Message | Last commit message (truncated) |
 
@@ -157,7 +157,8 @@ An in-progress git operation, a worktree-location attribute, or a branch with no
 | `↻` | `operation_state` `"rebase"`, `"merge"`, `"cherry_pick"`, `"revert"`, `"bisect"` | A git operation is in progress; `git status` names it |
 | `⊟` | `worktree.state` `"prunable"` | Prunable (worktree directory missing) |
 | `⊞` | `worktree.state` `"locked"` | Locked worktree |
-| `⚑` | `worktree.state` `"branch_worktree_mismatch"` | Branch name doesn't match the worktree path |
+| `⚑` | `worktree.state` `"duplicate_branch"` | Branch checked out in more than one worktree, so `wt` resolves it to whichever git lists first; every worktree on the branch is flagged |
+| `⚑` | `worktree.state` `"branch_worktree_mismatch"` | Worktree isn't at the path its branch implies — including a detached one, which has no branch to imply a path and so is never at home |
 | `/` | `kind` `"branch"` | Branch without a worktree (no `worktree` object) |
 
 ### Default branch
@@ -228,6 +229,7 @@ One envelope object. Items carry independent facts; rendered strings
                "committed_at": "2025-01-01T08:00:00Z"},
       "worktree": {"path": "/home/user/repo.feature", "main": false, "current": true,
                    "previous": false, "detached": false, "branch_mismatch": false,
+                   "duplicate_branch": false,
                    "changes": {"staged": false, "modified": true, "untracked": false,
                                "renamed": false, "deleted": false, "conflicted": false,
                                "diff": {"added": 10, "deleted": 2}}},
@@ -259,13 +261,13 @@ Item fields:
 | `branch` | Branch name; null for a detached-HEAD worktree. Remote rows carry the bare name with the remote in `remote` |
 | `remote` | Remote name, present only on remote-only branch rows |
 | `head` | `{sha, short_sha, subject, committed_at}`; null for unborn branches. `committed_at` is RFC 3339 UTC |
-| `worktree` | `{path, main, current, previous, detached, locked, prunable, branch_mismatch, operation, changes}`; absent on branch-only rows. `locked`/`prunable` are `{reason}` objects and can co-occur; `operation` is `"rebase"` or `"merge"`; `changes` holds the five working-tree flags plus `conflicted` and `diff {added, deleted}` |
+| `worktree` | `{path, main, current, previous, detached, locked, prunable, branch_mismatch, duplicate_branch, operation, changes}`; absent on branch-only rows. `locked`/`prunable` are `{reason}` objects and can co-occur; `operation` is `"rebase"` or `"merge"`; `changes` holds the five working-tree flags plus `conflicted` and `diff {added, deleted}` |
 | `default_branch` | Relation to the default branch: `{ahead, behind, diff, orphan, integration, merge_conflicts}`; absent on the default branch itself. `integration.reason` is one of `same_commit`, `ancestor`, `no_added_changes`, `trees_match`, `merge_adds_nothing`, `patch_id_match`; a dirty tree skips the checks, leaving `integration` null |
 | `upstream` | Tracking branch: `{remote, branch, ahead, behind}`; absent when none is configured |
-| `pr` | Open PR/MR: `{number, url, review, mergeable, repo}`; collected with `--full` or a listed `ci` column. `review` uses the schema 1 `ci.review_state` vocabulary; `mergeable` is false when the forge reports conflicts, null otherwise |
-| `checks` | CI pipeline: `{status, source, stale}`; `status` is `passed`, `running`, or `failed` — null when a conflicts report masks it |
+| `pr` | Open PR/MR: `{number, url, review, mergeable, repo}`; collected with `--full`. `review` uses the schema 1 `ci.review_state` vocabulary; `mergeable` is false when the forge reports conflicts, null otherwise |
+| `checks` | CI pipeline: `{status, source, stale}`; collected with `--full`. `status` is `passed`, `running`, or `failed` — null when a conflicts report masks it |
 | `dev_server` | `{url, listening}` from the project's `list.url` template |
-| `summary` | LLM branch summary (requires `[list] summary = true`) |
+| `summary` | LLM branch summary; needs `--full`, `[list] summary = true`, and a `[commit.generation]` command |
 | `vars` | Per-branch variables from [`wt config state vars`](https://worktrunk.dev/config/#wt-config-state-vars) |
 | `display` | Rendered strings: `state` (schema 1's `main_state` vocabulary), `symbols`, `statusline` (with ANSI colors and OSC 8 hyperlinks), `columns` (custom-column cells keyed by header) |
 
@@ -275,7 +277,7 @@ Schema 1 names map directly: `commit` → `head`, `working_tree` →
 `url_active` → `dev_server`, `statusline`/`symbols`/`columns` → `display.*`,
 and the per-item `repo` moves to the envelope's `repo.forge`.
 
-```bash
+```console
 # Current worktree path (for scripts)
 $ wt list --format=json | jq -r '.items[] | select(.worktree.current) | .worktree.path'
 
@@ -289,11 +291,16 @@ $ wt list --format=json | jq '.items[] | select(.display.state == "integrated" o
 $ wt list --format=json | jq '.items[] | select(.upstream.ahead > 0) | .branch'
 ```
 
+A JSON Schema for the envelope is published at
+[worktrunk.dev/schema/list-v2.json](https://worktrunk.dev/schema/list-v2.json).
+It describes what `wt` writes, so a field the absence rule can omit is
+optional there rather than required-and-null.
+
 ### Schema 1
 
 The original bare-array format, and the default while unset:
 
-```bash
+```console
 # Current worktree path (for scripts)
 $ wt list --format=json | jq -r '.[] | select(.is_current) | .path'
 
@@ -395,7 +402,7 @@ Present only for worktree-kind items. `state` is the worktree-location attribute
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `state` | string | `"branch_worktree_mismatch"`, `"prunable"`, or `"locked"` (absent when normal) |
+| `state` | string | `"branch_worktree_mismatch"`, `"duplicate_branch"`, `"prunable"`, or `"locked"` (absent when normal) |
 | `reason` | string | Reason for locked/prunable state |
 | `detached` | boolean | HEAD is detached |
 
@@ -520,7 +527,7 @@ The line carries the same cells as the worktree's row in `wt list`. A stale CI s
 
 A cell with nothing to show is left out rather than blanked, so most lines are shorter than that; `claude-code` also drops `branch` where `dir` already ends in `.<branch>`. A line that still overruns the terminal drops whole cells, least important first, starting with the dev server URL.
 
-The CI reference links to its PR/MR, and a dev server URL carrying a port shows as `:3000` linking to the URL in full, dim until something answers on that port. Both links are OSC 8, which a terminal that doesn't support them discards, leaving the same text unclickable.
+The CI reference links to its PR/MR, and a dev server URL carrying a port shows as `:3000` linking to the URL in full, dim until something answers on that port. Both are underlined, which is what marks them as clickable. They are OSC 8 links, and a terminal that doesn't support those discards the escape, leaving the underlined text unclickable.
 
 ### Claude Code mode
 

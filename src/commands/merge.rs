@@ -7,6 +7,8 @@ use worktrunk::config::{MergeConfig, UserConfig};
 use worktrunk::git::Repository;
 use worktrunk::styling::{eprintln, info_message};
 
+use crate::output::print_json;
+
 use super::command_approval::approve_commit_template_append;
 use super::command_executor::FailureStrategy;
 use super::commit::{CommitOptions, HookGate};
@@ -116,7 +118,7 @@ fn approve_merge_plan(
 
     // Every feature-worktree hook shares one anchor: the feature worktree's
     // canonical root, the exact path `finish_after_merge` records as
-    // `RemoveResult::worktree_path` and `handle_merge` passes as the
+    // `RemovalPlan::worktree_path` and `handle_merge` passes as the
     // `pre-merge` executor anchor, so every plan lookup is an exact match.
     // `pre-commit`/`post-commit` run via the unchanged `execute_hook` path and
     // are listed only so the single prompt is complete; their anchor is never
@@ -258,7 +260,7 @@ pub fn handle_merge(opts: MergeOptions<'_>) -> anyhow::Result<()> {
     }
 
     // Worktree for target is optional: if present we use it for safety checks and as destination.
-    let target_worktree_path = repo.worktree_for_branch(&target_branch)?;
+    let target_worktree_path = repo.usable_worktree_for_branch(&target_branch)?;
     // Where `post-merge` / `post-remove` / `post-switch` run: the target
     // branch's worktree if it exists, else the primary worktree. Mirrors
     // `finish_after_merge`'s destination resolution. (Config is resolved from
@@ -281,7 +283,7 @@ pub fn handle_merge(opts: MergeOptions<'_>) -> anyhow::Result<()> {
     // (by-then-rebased / merged) on-disk config is structurally impossible.
     let project_id = repo.project_identifier()?;
     // One anchor for every feature-worktree hook: the canonical root, the same
-    // value `finish_after_merge` records as `RemoveResult::worktree_path`.
+    // value `finish_after_merge` records as `RemovalPlan::worktree_path`.
     let feature_root = current_wt.root()?;
     let plan = approve_merge_plan(
         repo,
@@ -347,7 +349,6 @@ pub fn handle_merge(opts: MergeOptions<'_>) -> anyhow::Result<()> {
             options.target_branch = Some(&target_branch);
             options.hooks = commit_hooks;
             options.stage_mode = stage_mode;
-            options.warn_about_untracked = stage_mode == super::commit::StageMode::All;
             options.show_no_squash_note = true;
             options.guidance = guidance.clone();
 
@@ -430,10 +431,10 @@ pub fn handle_merge(opts: MergeOptions<'_>) -> anyhow::Result<()> {
     });
     if !ff {
         // Create a merge commit on the target branch via commit-tree + update-ref
-        let _ = handle_no_ff_merge(Some(&target_branch), operations, &current_branch)?;
+        handle_no_ff_merge(Some(&target_branch), operations, &current_branch)?;
     } else {
         // Fast-forward push to target branch
-        let _ = handle_push(Some(&target_branch), PushKind::MergeFastForward, operations)?;
+        handle_push(Some(&target_branch), PushKind::MergeFastForward, operations)?;
     }
 
     let removed = finish_after_merge(
@@ -463,7 +464,7 @@ pub fn handle_merge(opts: MergeOptions<'_>) -> anyhow::Result<()> {
             "rebased": rebased,
             "removed": removed,
         });
-        println!("{}", serde_json::to_string_pretty(&output)?);
+        print_json(&output)?;
     }
 
     Ok(())

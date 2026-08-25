@@ -1204,6 +1204,50 @@ fn test_foreground_pipeline_undefined_var_runs_earlier_steps(repo: TestRepo) {
     );
 }
 
+/// The other half of that contract: a *syntax* error anywhere in the pipeline
+/// aborts before step 1. Preparation parses every template
+/// (`PreparedPipeline::validated`), so a pipeline that can't render in full never
+/// starts — where a semantic error, rendered per step, lets earlier steps run.
+///
+/// Driven through `wt merge`'s pre-commit hooks rather than `wt hook
+/// pre-commit`, because the `wt hook` CLI parses every template up front to
+/// route shorthand arguments (`referenced_vars_union`) and would catch the
+/// error before preparation, leaving the preparation-time guard untested.
+#[rstest]
+fn test_foreground_pipeline_syntax_error_aborts_before_first_step(mut repo: TestRepo) {
+    let feature_wt = repo.add_worktree("feature");
+    fs::write(feature_wt.join("uncommitted.txt"), "uncommitted content").unwrap();
+
+    repo.write_test_config(
+        r#"pre-commit = [
+    { first = "echo FIRST_RAN > syntax_first_marker.txt" },
+    { broken = "echo {{ bad..syntax }}" },
+]
+"#,
+    );
+
+    let output = repo
+        .wt_command()
+        .args(["merge", "main", "--yes", "--no-remove"])
+        .current_dir(&feature_wt)
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "an unparsable template should fail the merge"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("syntax error"),
+        "error should name the syntax failure, got: {stderr}"
+    );
+    assert!(
+        !feature_wt.join("syntax_first_marker.txt").exists(),
+        "step 1 must not run when a later step's template can't parse: {stderr}"
+    );
+}
+
 /// When removing the current worktree (cd back to main), both post-remove and
 /// post-switch hooks fire. They should appear on a single combined announcement line.
 #[rstest]
@@ -2276,6 +2320,56 @@ fn test_hook_multiple_name_filters(repo: TestRepo) {
             &["pre-merge", "first", "second", "--yes"],
             None
         )
+    );
+}
+
+/// A source-scoped filter must not bleed its name into another source.
+/// `wt hook pre-merge user:foo bar`, with user `foo`, project `foo`, and
+/// project `bar` defined, runs user `foo` and project `bar` — but not project
+/// `foo`, which the `user:foo` scope excludes even though the unscoped `bar`
+/// admits the project source.
+///
+/// Each command writes a marker file rather than echoing. The announcement
+/// prints a command's body before running it, so asserting on stdout would
+/// pin which commands were selected rather than which ones ran.
+#[rstest]
+fn test_hook_source_scoped_filter_does_not_bleed_into_other_source(repo: TestRepo) {
+    repo.write_test_config(
+        r#"[pre-merge]
+foo = "echo ran > user_foo.txt"
+"#,
+    );
+    repo.write_project_config(
+        r#"[pre-merge]
+foo = "echo ran > project_foo.txt"
+bar = "echo ran > project_bar.txt"
+"#,
+    );
+    repo.commit("Add pre-merge hooks");
+
+    let output = repo
+        .wt_command()
+        .args(["hook", "pre-merge", "user:foo", "bar", "--yes"])
+        .output()
+        .expect("Failed to run wt hook pre-merge");
+
+    assert!(
+        output.status.success(),
+        "wt hook pre-merge failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        repo.root_path().join("user_foo.txt").exists(),
+        "user:foo should run the user's foo"
+    );
+    assert!(
+        repo.root_path().join("project_bar.txt").exists(),
+        "unscoped bar should run the project's bar"
+    );
+    assert!(
+        !repo.root_path().join("project_foo.txt").exists(),
+        "project foo must not run — user:foo is scoped to the user source"
     );
 }
 
@@ -3888,7 +3982,7 @@ approved-commands = ["echo project-hook"]
 // convention — `<!-- wt hook pre-merge (docs-example) -->` in `src/cli/mod.rs`.
 // ============================================================================
 
-/// `wt hook pre-merge` example for `docs/content/hook.md` — two named
+/// `wt hook pre-merge` example for `docs/src/content/docs/hook.md` — two named
 /// pre-merge hooks (test, lint) running mocked `cargo` commands.
 #[rstest]
 fn test_docs_hook_pre_merge(repo: TestRepo) {
@@ -3921,7 +4015,7 @@ lint = "cargo clippy"
         assert_cmd_snapshot!("docs_hook_pre_merge", {
             let mut cmd = make_snapshot_cmd(&repo, "hook", &["pre-merge", "--yes"], None);
             cmd.env("PATH", &new_path);
-            cmd.env("MOCK_CONFIG_DIR", &bin_dir_str);
+            cmd.env("WORKTRUNK_TEST_MOCK_CONFIG_DIR", &bin_dir_str);
             cmd
         });
     });
