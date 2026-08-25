@@ -77,11 +77,12 @@ pub fn handle_pi_install(yes: bool) -> Result<()> {
     let action = if target.exists() { "Update" } else { "Install" };
     let preview_msg = info_message(cformat!("Would write to <bold>{target_display}</>"));
     let preview = || eprintln!("{}", preview_msg);
-    if !confirm_or_yes(
+    let confirmed = confirm_or_yes(
         yes,
         &cformat!("{action} Pi plugin @ <bold>{target_display}</>?"),
         preview,
-    )? {
+    );
+    if !confirmed? {
         return Ok(());
     }
 
@@ -117,11 +118,12 @@ pub fn handle_pi_uninstall(yes: bool) -> Result<()> {
 
     let preview_msg = info_message(cformat!("Would remove <bold>{target_display}</>"));
     let preview = || eprintln!("{}", preview_msg);
-    if !confirm_or_yes(
+    let confirmed = confirm_or_yes(
         yes,
         &cformat!("Remove Pi plugin @ <bold>{target_display}</>?"),
         preview,
-    )? {
+    );
+    if !confirmed? {
         return Ok(());
     }
 
