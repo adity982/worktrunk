@@ -2651,7 +2651,7 @@ fn test_pi_install_honors_agent_dir_override(temp_home: TempDir) {
 }
 
 #[rstest]
-fn test_pi_agent_dir_override_takes_precedence_over_profile(temp_home: TempDir) {
+fn test_pi_named_profile_ignores_agent_dir_override(temp_home: TempDir) {
     let agent_dir = temp_home.path().join("custom-pi-agent");
     let mut cmd = wt_command();
     set_temp_home_env(&mut cmd, temp_home.path());
@@ -2661,9 +2661,9 @@ fn test_pi_agent_dir_override_takes_precedence_over_profile(temp_home: TempDir) 
 
     let output = cmd.output().expect("install command should run");
     assert!(output.status.success(), "install failed: {output:?}");
-    assert!(agent_dir.join("hooks/pre/worktrunk.ts").exists());
+    assert!(!agent_dir.join("hooks/pre/worktrunk.ts").exists());
     assert!(
-        !temp_home
+        temp_home
             .path()
             .join(".omp/profiles/research/agent/hooks/pre/worktrunk.ts")
             .exists()

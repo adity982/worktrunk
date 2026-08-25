@@ -26,6 +26,9 @@ fn pi_agent_dir() -> Result<PathBuf> {
     if let Some(path) = std::env::var("PI_CODING_AGENT_DIR")
         .ok()
         .filter(|value| !value.is_empty())
+        // Named profiles ignore `PI_CODING_AGENT_DIR` upstream, so the
+        // override applies to the default profile only.
+        .filter(|_| active_profile().is_none())
     {
         return Ok(PathBuf::from(path));
     }

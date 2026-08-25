@@ -219,8 +219,9 @@ $ wt config plugins pi install --yes
 ## Plugin location
 
 The default location is `~/.omp/agent/hooks/pre/worktrunk.ts`. The installer
-honors `$PI_CODING_AGENT_DIR`, `$PI_CONFIG_DIR`, and active
-`$OMP_PROFILE` / `$PI_PROFILE` profiles."#
+honors `$PI_CONFIG_DIR` and active `$OMP_PROFILE` / `$PI_PROFILE` profiles.
+`$PI_CODING_AGENT_DIR` overrides the agent directory for the default profile
+only — named profiles ignore it, matching Pi's own resolution."#
     )]
     Install,
 
