@@ -2259,6 +2259,43 @@ fn test_config_show_opencode_plugin_outdated(mut repo: TestRepo, temp_home: Temp
 }
 
 #[rstest]
+#[case(None, "Plugin not installed")]
+#[case(Some("// outdated plugin content\n"), "Plugin outdated")]
+#[case(Some(include_str!("../../dev/pi-plugin.ts")), "Plugin installed")]
+fn test_config_show_pi_plugin_status(
+    mut repo: TestRepo,
+    temp_home: TempDir,
+    #[case] plugin_content: Option<&str>,
+    #[case] expected_status: &str,
+) {
+    repo.setup_mock_ci_tools_unauthenticated();
+    let plugin_path = temp_home.path().join(".omp/agent/hooks/pre/worktrunk.ts");
+    if let Some(content) = plugin_content {
+        fs::create_dir_all(plugin_path.parent().unwrap()).unwrap();
+        fs::write(&plugin_path, content).unwrap();
+    }
+
+    let global_config_dir = temp_home.path().join(".config").join("worktrunk");
+    fs::create_dir_all(&global_config_dir).unwrap();
+    fs::write(global_config_dir.join("config.toml"), "").unwrap();
+
+    let mut cmd = repo.wt_command();
+    cmd.args(["config", "show"]).current_dir(repo.root_path());
+    set_temp_home_env(&mut cmd, temp_home.path());
+    set_xdg_config_path(&mut cmd, temp_home.path());
+    cmd.env("WORKTRUNK_TEST_PI_INSTALLED", "1");
+
+    let output = cmd.output().expect("config show should run");
+    assert!(output.status.success(), "config show failed: {output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("PI"), "missing Pi section: {stdout}");
+    assert!(
+        stdout.contains(expected_status),
+        "missing Pi status: {stdout}"
+    );
+}
+
+#[rstest]
 fn test_config_show_gemini_available_extension_not_installed(
     mut repo: TestRepo,
     temp_home: TempDir,

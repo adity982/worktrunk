@@ -1207,6 +1207,14 @@ pub fn set_temp_home_env(cmd: &mut Command, home: &Path) {
     // matches the setup helpers and stays hermetic against an ambient
     // CLAUDE_CONFIG_DIR inherited from the test runner's environment.
     cmd.env("CLAUDE_CONFIG_DIR", home.join(".claude"));
+    for var in [
+        "OMP_PROFILE",
+        "PI_PROFILE",
+        "PI_CONFIG_DIR",
+        "PI_CODING_AGENT_DIR",
+    ] {
+        cmd.env_remove(var);
+    }
 }
 
 /// Override `WORKTRUNK_CONFIG_PATH` to point to the XDG-derived user config path

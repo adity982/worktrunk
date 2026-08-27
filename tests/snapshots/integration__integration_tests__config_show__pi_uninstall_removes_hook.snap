@@ -44,4 +44,4 @@ exit_code: 0
 ----- stdout -----
 
 ----- stderr -----
-[32m✓[39m [32mPlugin removed @ [1m~/.omp/agent/hooks/pre/worktrunk.ts[22m[39m
+[32m✓[39m [32mPlugin removed from [1m~/.omp/agent/hooks/pre/worktrunk.ts[22m[39m

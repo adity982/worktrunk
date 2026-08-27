@@ -33,6 +33,98 @@ pub use state::{
 };
 pub use update::handle_config_update;
 
+fn install_file_plugin(
+    name: &str,
+    target: &std::path::Path,
+    source: &str,
+    yes: bool,
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+    use color_print::cformat;
+    use worktrunk::path::format_path_for_display;
+    use worktrunk::styling::{eprintln, hint_message, info_message, success_message};
+
+    use crate::output::prompt::{PromptResponse, prompt_yes_no_preview};
+
+    let target_display = format_path_for_display(target);
+    if target.exists()
+        && let Ok(existing) = std::fs::read_to_string(target)
+        && existing == source
+    {
+        eprintln!(
+            "{}",
+            info_message(cformat!(
+                "Plugin already installed @ <bold>{target_display}</>"
+            ))
+        );
+        return Ok(());
+    }
+
+    let action = if target.exists() { "Update" } else { "Install" };
+    let preview_msg = info_message(cformat!("Would write to <bold>{target_display}</>"));
+    let confirmed = yes
+        || prompt_yes_no_preview(
+            &cformat!("{action} {name} plugin @ <bold>{target_display}</>?"),
+            || eprintln!("{}", preview_msg),
+        )? == PromptResponse::Accepted;
+    if !confirmed {
+        return Ok(());
+    }
+
+    let parent = target
+        .parent()
+        .context("Plugin path has no parent directory")?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("Failed to create directory {}", parent.display()))?;
+    worktrunk::utils::write_atomically(target, source)
+        .with_context(|| format!("Failed to write plugin to {target_display}"))?;
+
+    eprintln!(
+        "{}",
+        success_message(cformat!("Plugin installed @ <bold>{target_display}</>"))
+    );
+    eprintln!(
+        "{}",
+        hint_message(cformat!(
+            "Activity markers (🤖/💬) will appear in <underline>wt list</>"
+        ))
+    );
+    Ok(())
+}
+
+fn uninstall_file_plugin(name: &str, target: &std::path::Path, yes: bool) -> anyhow::Result<()> {
+    use anyhow::Context;
+    use color_print::cformat;
+    use worktrunk::path::format_path_for_display;
+    use worktrunk::styling::{eprintln, info_message, success_message};
+
+    use crate::output::prompt::{PromptResponse, prompt_yes_no_preview};
+
+    let target_display = format_path_for_display(target);
+    if !target.exists() {
+        eprintln!("{}", info_message("Plugin not installed"));
+        return Ok(());
+    }
+
+    let preview_msg = info_message(cformat!("Would remove <bold>{target_display}</>"));
+    let confirmed = yes
+        || prompt_yes_no_preview(
+            &cformat!("Remove {name} plugin @ <bold>{target_display}</>?"),
+            || eprintln!("{}", preview_msg),
+        )? == PromptResponse::Accepted;
+    if !confirmed {
+        return Ok(());
+    }
+
+    std::fs::remove_file(target)
+        .with_context(|| format!("Failed to remove plugin at {target_display}"))?;
+    eprintln!(
+        "{}",
+        success_message(cformat!("Plugin removed from <bold>{target_display}</>"))
+    );
+    Ok(())
+}
+
 /// Run a plugin-CLI command (`claude` / `codex`), surfacing a non-zero exit
 /// as a typed [`worktrunk::git::CommandError`].
 fn run_plugin_cli(program: &str, args: &[&str]) -> anyhow::Result<()> {
