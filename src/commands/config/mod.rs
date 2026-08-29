@@ -32,6 +32,7 @@ pub use state::{
     handle_state_show, handle_vars_clear, handle_vars_get, handle_vars_list, handle_vars_set,
 };
 pub use update::handle_config_update;
+use worktrunk::styling::{eprintln, hint_message, info_message, success_message};
 
 fn install_file_plugin(
     name: &str,
@@ -39,12 +40,10 @@ fn install_file_plugin(
     source: &str,
     yes: bool,
 ) -> anyhow::Result<()> {
+    use crate::output::prompt::{PromptResponse, prompt_yes_no_preview};
     use anyhow::Context;
     use color_print::cformat;
     use worktrunk::path::format_path_for_display;
-    use worktrunk::styling::{eprintln, hint_message, info_message, success_message};
-
-    use crate::output::prompt::{PromptResponse, prompt_yes_no_preview};
 
     let target_display = format_path_for_display(target);
     if target.exists()
@@ -93,12 +92,10 @@ fn install_file_plugin(
 }
 
 fn uninstall_file_plugin(name: &str, target: &std::path::Path, yes: bool) -> anyhow::Result<()> {
+    use crate::output::prompt::{PromptResponse, prompt_yes_no_preview};
     use anyhow::Context;
     use color_print::cformat;
     use worktrunk::path::format_path_for_display;
-    use worktrunk::styling::{eprintln, info_message, success_message};
-
-    use crate::output::prompt::{PromptResponse, prompt_yes_no_preview};
 
     let target_display = format_path_for_display(target);
     if !target.exists() {
