@@ -34,6 +34,7 @@ pub use state::{
 pub use update::handle_config_update;
 use worktrunk::styling::{eprintln, hint_message, info_message, success_message};
 
+/// Install or update a file-based agent plugin after confirmation.
 fn install_file_plugin(
     name: &str,
     target: &std::path::Path,
@@ -61,10 +62,11 @@ fn install_file_plugin(
 
     let action = if target.exists() { "Update" } else { "Install" };
     let preview_msg = info_message(cformat!("Would write to <bold>{target_display}</>"));
+    let preview = || eprintln!("{}", preview_msg);
     let confirmed = yes
         || prompt_yes_no_preview(
             &cformat!("{action} {name} plugin @ <bold>{target_display}</>?"),
-            || eprintln!("{}", preview_msg),
+            preview,
         )? == PromptResponse::Accepted;
     if !confirmed {
         return Ok(());
@@ -91,6 +93,7 @@ fn install_file_plugin(
     Ok(())
 }
 
+/// Remove a file-based agent plugin after confirmation.
 fn uninstall_file_plugin(name: &str, target: &std::path::Path, yes: bool) -> anyhow::Result<()> {
     use crate::output::prompt::{PromptResponse, prompt_yes_no_preview};
     use anyhow::Context;
@@ -104,10 +107,11 @@ fn uninstall_file_plugin(name: &str, target: &std::path::Path, yes: bool) -> any
     }
 
     let preview_msg = info_message(cformat!("Would remove <bold>{target_display}</>"));
+    let preview = || eprintln!("{}", preview_msg);
     let confirmed = yes
         || prompt_yes_no_preview(
             &cformat!("Remove {name} plugin @ <bold>{target_display}</>?"),
-            || eprintln!("{}", preview_msg),
+            preview,
         )? == PromptResponse::Accepted;
     if !confirmed {
         return Ok(());

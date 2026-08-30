@@ -2390,7 +2390,7 @@ fn test_config_show_gemini_extension_installed(mut repo: TestRepo, temp_home: Te
 /// override the harness sets, so the production `which::which` PATH lookup is
 /// otherwise never exercised. `setup_mock_clis_on_path()` drops the overrides
 /// and prepends real mock executables, so this single run covers the
-/// PATH-detection path for all four AI CLIs at once.
+/// PATH-detection path for all five AI CLIs at once.
 #[rstest]
 fn test_config_show_clis_detected_via_path(mut repo: TestRepo, temp_home: TempDir) {
     repo.setup_mock_ci_tools_unauthenticated();
